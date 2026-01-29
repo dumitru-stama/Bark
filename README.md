@@ -32,6 +32,7 @@ A modern Norton Commander / Midnight Commander clone written in Rust with a focu
 git clone https://github.com/yourusername/bark.git
 cd bark
 cargo build --release
+# To install plugins (see below for details): make install-plugins
 ./target/release/ba
 ```
 
