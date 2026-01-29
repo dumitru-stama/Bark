@@ -1280,6 +1280,9 @@ impl App {
             dest
         };
 
+        // Single file to a non-directory destination = rename (use dest as full path)
+        let is_rename = sources.len() == 1 && !dest.is_dir();
+
         // Check if source (active) panel is remote
         let src_is_remote = self.active_panel().is_remote();
         // Check if destination (inactive) panel is remote
@@ -1336,8 +1339,11 @@ impl App {
                     }
                 }
                 FileOperation::Copy => {
-                    let file_name = src_path.file_name().unwrap_or_default();
-                    let dest_file = dest.join(file_name);
+                    let dest_file = if is_rename {
+                        dest.clone()
+                    } else {
+                        dest.join(src_path.file_name().unwrap_or_default())
+                    };
 
                     match (src_is_remote, dest_is_remote) {
                         (false, false) => {
@@ -1423,8 +1429,11 @@ impl App {
                     }
                 }
                 FileOperation::Move => {
-                    let file_name = src_path.file_name().unwrap_or_default();
-                    let dest_file = dest.join(file_name);
+                    let dest_file = if is_rename {
+                        dest.clone()
+                    } else {
+                        dest.join(src_path.file_name().unwrap_or_default())
+                    };
 
                     match (src_is_remote, dest_is_remote) {
                         (false, false) => {
@@ -1548,12 +1557,10 @@ impl App {
     /// Start a file operation with overwrite conflict checking.
     /// Called from the confirmation dialog instead of execute_file_operation() directly.
     pub fn start_file_operation(&mut self, operation: FileOperation, sources: Vec<PathBuf>, dest: PathBuf) {
-        // Resolve relative destination paths against the inactive panel's directory
+        // Resolve relative destination paths against the active panel's directory
+        // (so typing just a filename in F5/F6 renames in the current directory)
         let dest = if dest.is_relative() {
-            let base = match self.active_panel {
-                Side::Left => self.right_panel.path.clone(),
-                Side::Right => self.left_panel.path.clone(),
-            };
+            let base = self.active_panel().path.clone();
             base.join(&dest).canonicalize().unwrap_or_else(|_| base.join(&dest))
         } else {
             dest
@@ -1589,6 +1596,13 @@ impl App {
 
     /// Find destination files that already exist (overwrite conflicts).
     fn find_overwrite_conflicts(sources: &[PathBuf], dest: &Path) -> Vec<PathBuf> {
+        // Single file to a non-directory dest = rename; check if dest itself exists
+        if sources.len() == 1 && !dest.is_dir() {
+            if dest.exists() {
+                return sources.to_vec();
+            }
+            return Vec::new();
+        }
         sources.iter().filter_map(|src| {
             let name = src.file_name()?;
             let dest_file = dest.join(name);

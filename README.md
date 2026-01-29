@@ -2,6 +2,8 @@
 
 A modern Norton Commander / Midnight Commander clone written in Rust with a focus on usability and extensibility.
 
+![Bark screenshot](docs/screenshot.png)
+
 ![Rust](https://img.shields.io/badge/rust-2024-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 

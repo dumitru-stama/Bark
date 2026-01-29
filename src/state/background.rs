@@ -241,6 +241,8 @@ impl BackgroundTask {
             let mut count = 0usize;
             let mut errors = Vec::new();
             let bytes_done = Arc::new(AtomicU64::new(0));
+            // Single file to a non-directory destination = rename
+            let is_rename = sources.len() == 1 && !dest.is_dir();
 
             for (i, src_path) in sources.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
@@ -248,7 +250,11 @@ impl BackgroundTask {
                 }
 
                 let file_name = src_path.file_name().unwrap_or_default();
-                let dest_file = dest.join(file_name);
+                let dest_file = if is_rename {
+                    dest.clone()
+                } else {
+                    dest.join(file_name)
+                };
 
                 // Send progress update with current file
                 let current_name = file_name.to_string_lossy().to_string();
