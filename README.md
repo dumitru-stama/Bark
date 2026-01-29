@@ -208,7 +208,7 @@ theme                          Switch color theme
 show_hidden = false
 follow_symlinks = true
 remember_path = true
-edit_mode_always = true
+edit_mode_always = true  # false for VIM/Helix mode; Enter : to input commands
 run_executables = true
 autosave = false  # Auto-save config on exit
 shell = ""  # Override shell (e.g., "pwsh", "cmd.exe", "/bin/zsh"). Empty = auto-detect
