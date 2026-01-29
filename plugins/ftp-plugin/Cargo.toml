@@ -1,0 +1,14 @@
+[package]
+name = "bark-ftp-plugin"
+version = "0.1.0"
+edition = "2024"
+description = "FTP/FTPS provider plugin for Bark file manager (external plugin)"
+license = "MIT"
+
+[[bin]]
+name = "bark-ftp"
+path = "src/main.rs"
+
+[dependencies]
+bark-plugin-api = { path = "../plugin-api" }
+suppaftp = { version = "6.3", features = ["native-tls"] }

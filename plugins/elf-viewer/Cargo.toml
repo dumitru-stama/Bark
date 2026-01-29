@@ -1,0 +1,13 @@
+[package]
+name = "bark-elf-viewer"
+version = "0.1.0"
+edition = "2024"
+description = "ELF file viewer plugin for Bark file manager"
+license = "MIT"
+
+[[bin]]
+name = "bark-elf-viewer"
+path = "src/main.rs"
+
+[dependencies]
+bark-plugin-api = { path = "../plugin-api" }

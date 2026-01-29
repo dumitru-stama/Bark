@@ -1,0 +1,8 @@
+[package]
+name = "bark-plugin-api"
+version = "0.1.0"
+edition = "2024"
+description = "Plugin API for Bark file manager"
+license = "MIT"
+
+[dependencies]

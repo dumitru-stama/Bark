@@ -1,0 +1,37 @@
+[workspace]
+members = [".", "plugins/plugin-api", "plugins/ftp-plugin", "plugins/elf-viewer", "plugins/archive-plugin", "plugins/webdav-plugin"]
+resolver = "2"
+
+[package]
+name = "bark"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "ba"
+path = "src/main.rs"
+
+[dependencies]
+# Plugin API (for adapters)
+bark-plugin-api = { path = "plugins/plugin-api" }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Config
+toml_edit = { version = "0.22", features = ["serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+
+# Utils
+regex = "1"
+portable-pty = "0.8"
+memmap2 = "0.9"
+thiserror = "2.0.18"
+
+# Remote access
+ssh2 = "0.9"
+filetime = "0.2.27"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
