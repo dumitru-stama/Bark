@@ -24,6 +24,7 @@ pub use dialog::ViewerSearchDialog;
 pub use dialog::SelectFilesDialog;
 pub use dialog::ScpConnectDialog;
 pub use dialog::ScpPasswordPromptDialog;
+pub use dialog::ArchivePasswordPromptDialog;
 pub use dialog::UserMenuDialog;
 pub use dialog::UserMenuEditDialog;
 pub use help::HelpViewer;

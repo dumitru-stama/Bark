@@ -196,11 +196,13 @@ pub struct ShellArea<'a> {
     input: &'a str,
     /// Command prompt (e.g., "/path/to/dir> ")
     prompt: &'a str,
+    /// Scroll offset (0 = bottom/newest)
+    scroll_offset: usize,
 }
 
 impl<'a> ShellArea<'a> {
-    pub fn new(history: &'a [String], input: &'a str, prompt: &'a str) -> Self {
-        Self { history, input, prompt }
+    pub fn new(history: &'a [String], input: &'a str, prompt: &'a str, scroll_offset: usize) -> Self {
+        Self { history, input, prompt, scroll_offset }
     }
 }
 
@@ -229,16 +231,26 @@ impl Widget for ShellArea<'_> {
         // Render command prompt on the last line
         let prompt_y = area.y + area.height - 1;
 
-        // Render history lines (show the most recent ones that fit, bottom-aligned above prompt)
+        // Render history lines (with scroll offset support, bottom-aligned above prompt)
         if history_lines > 0 && !self.history.is_empty() {
-            let visible_count = self.history.len().min(history_lines);
-            let start = self.history.len().saturating_sub(history_lines);
+            // end points past the last line we want to show
+            let end = self.history.len().saturating_sub(self.scroll_offset);
+            let start = end.saturating_sub(history_lines);
+            let visible_count = end - start;
             // Position history lines just above the prompt
             let history_start_y = prompt_y - visible_count as u16;
-            for (i, line) in self.history.iter().skip(start).enumerate() {
+            for (i, line) in self.history[start..end].iter().enumerate() {
                 let y = history_start_y + i as u16;
                 // Render with ANSI color support
                 render_ansi_string(area.x, y, line, width, buf);
+            }
+
+            // Show scroll indicator when not at bottom
+            if self.scroll_offset > 0 && width > 10 {
+                let indicator = format!("[+{}]", self.scroll_offset);
+                let ind_x = area.x + width as u16 - indicator.len() as u16;
+                let ind_style = Style::default().fg(Color::Yellow);
+                buf.set_string(ind_x, prompt_y.saturating_sub(1).max(area.y), &indicator, ind_style);
             }
         }
         buf.set_string(area.x, prompt_y, self.prompt, style);

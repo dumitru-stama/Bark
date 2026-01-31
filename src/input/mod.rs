@@ -54,6 +54,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::PluginConnect { .. } => dialogs::handle_plugin_connect_mode(app, key),
         Mode::UserMenu { .. } => dialogs::handle_user_menu_mode(app, key),
         Mode::UserMenuEdit { .. } => dialogs::handle_user_menu_edit_mode(app, key),
+        Mode::ArchivePasswordPrompt { .. } => dialogs::handle_archive_password_prompt_mode(app, key),
         Mode::OverwriteConfirm { .. } => dialogs::handle_overwrite_confirm_mode(app, key),
         Mode::FileOpProgress { .. } => {
             // During file operations, Escape cancels

@@ -10,5 +10,5 @@ name = "bark-ftp"
 path = "src/main.rs"
 
 [dependencies]
-bark-plugin-api = { path = "../plugin-api" }
+bark-plugin-api = { path = "../../plugin-api" }
 suppaftp = { version = "6.3", features = ["native-tls"] }

@@ -11,6 +11,30 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
+    // Shell area scrolling with Ctrl+Arrow/Page or Alt+Arrow/Page
+    // (Alt variants for macOS where Ctrl+Up triggers Mission Control)
+    if (ctrl || alt) && !app.cmd.focused {
+        match key.code {
+            KeyCode::Up => {
+                app.cmd.scroll_up(1);
+                return;
+            }
+            KeyCode::Down => {
+                app.cmd.scroll_down(1);
+                return;
+            }
+            KeyCode::PageUp => {
+                app.cmd.scroll_up(10);
+                return;
+            }
+            KeyCode::PageDown => {
+                app.cmd.scroll_down(10);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // Resizing with Shift+Arrow keys (not configurable - special UI function)
     if shift {
         match key.code {
@@ -483,7 +507,7 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         }
 
         // In edit_mode_always, regular characters go to command line
-        KeyCode::Char(c) if app.config.general.edit_mode_always && key.modifiers.is_empty() => {
+        KeyCode::Char(c) if app.config.general.edit_mode_always && !ctrl && !alt => {
             app.cmd.input.push(c);
         }
 
@@ -494,6 +518,29 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 fn handle_command_input(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+    // Shell area scrolling (Ctrl+Arrow/Page or Alt+Arrow/Page)
+    if ctrl || alt {
+        match key.code {
+            KeyCode::Up => {
+                app.cmd.scroll_up(1);
+                return;
+            }
+            KeyCode::Down => {
+                app.cmd.scroll_down(1);
+                return;
+            }
+            KeyCode::PageUp => {
+                app.cmd.scroll_up(10);
+                return;
+            }
+            KeyCode::PageDown => {
+                app.cmd.scroll_down(10);
+                return;
+            }
+            _ => {}
+        }
+    }
 
     match key.code {
         // Cancel command input
@@ -533,6 +580,7 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
 
         // Execute command (plain Enter)
         KeyCode::Enter => {
+            app.cmd.scroll_to_bottom();
             app.reset_completion();
             if !app.cmd.input.is_empty() {
                 app.execute_command();
@@ -582,6 +630,7 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
 
         // Type character (must be after ctrl combinations)
         KeyCode::Char(c) if !ctrl => {
+            app.cmd.scroll_to_bottom();
             app.reset_completion();
             app.cmd.input.push(c);
         }

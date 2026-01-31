@@ -106,6 +106,8 @@ pub struct Panel {
     pub selected: HashSet<PathBuf>,
     /// Show hidden files (starting with .)
     pub show_hidden: bool,
+    /// Show directory prefix (/ or \) before folder names
+    pub show_dir_prefix: bool,
     /// Whether this panel is in temporary mode (showing search results, etc.)
     pub temp_mode: bool,
     /// Saved state to restore when exiting temp mode
@@ -143,6 +145,7 @@ impl Panel {
             visible_height: 20, // Will be updated during first render
             selected: HashSet::new(),
             show_hidden: true,
+            show_dir_prefix: false,
             temp_mode: false,
             saved_state: None,
             provider: Box::new(LocalProvider::new()),
@@ -155,6 +158,14 @@ impl Panel {
     /// Check if currently inside an archive
     pub fn is_in_archive(&self) -> bool {
         self.parent_provider.is_some()
+    }
+
+    /// Get archive source path and name (if inside an archive)
+    pub fn archive_source(&self) -> Option<(std::path::PathBuf, String)> {
+        self.parent_provider.as_ref().map(|info| {
+            let full_path = info.path.join(&info.entry_name);
+            (full_path, info.entry_name.clone())
+        })
     }
 
     /// Check if this panel is browsing a remote filesystem
@@ -741,6 +752,22 @@ impl Panel {
         });
 
         // Switch to extension provider
+        self.provider.disconnect();
+        self.provider = provider;
+        self.path = PathBuf::from("/");
+        self.cursor = 0;
+        self.scroll_offset = 0;
+        self.selected.clear();
+        self.refresh();
+    }
+
+    /// Reconnect an extension-mode provider (e.g., after entering password for encrypted archive)
+    /// Replaces the current provider but preserves parent_provider info so ESC still works.
+    pub fn set_provider_password(&mut self, password: &str) -> crate::providers::ProviderResult<()> {
+        self.provider.set_password(password)
+    }
+
+    pub fn reconnect_extension_provider(&mut self, provider: Box<dyn PanelProvider>) {
         self.provider.disconnect();
         self.provider = provider;
         self.path = PathBuf::from("/");

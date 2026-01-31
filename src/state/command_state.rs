@@ -20,6 +20,8 @@ pub struct CommandState {
     pub completion_state: Option<(String, Vec<String>, usize)>,
     /// Shell output history (recent commands and their output)
     pub output: Vec<String>,
+    /// Scroll offset for shell area (0 = bottom/newest)
+    pub scroll_offset: usize,
 }
 
 #[allow(dead_code)]
@@ -98,12 +100,39 @@ impl CommandState {
 
     /// Add output line to shell history
     pub fn add_output(&mut self, line: String) {
+        // On Windows, ConPTY sends a screen-buffer redraw after returning
+        // from Ctrl+O shell mode which duplicates the last prompt line.
+        // Skip consecutive identical lines to suppress the noise.
+        #[cfg(windows)]
+        if let Some(last) = self.output.last() {
+            if *last == line {
+                return;
+            }
+        }
         self.output.push(line);
         // Keep last 1000 lines
         const MAX_OUTPUT: usize = 1000;
         if self.output.len() > MAX_OUTPUT {
             self.output.remove(0);
         }
+        // Auto-scroll to bottom on new output
+        self.scroll_offset = 0;
+    }
+
+    /// Scroll shell area up by n lines
+    pub fn scroll_up(&mut self, n: usize) {
+        let max_offset = self.output.len();
+        self.scroll_offset = (self.scroll_offset + n).min(max_offset);
+    }
+
+    /// Scroll shell area down by n lines
+    pub fn scroll_down(&mut self, n: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+    }
+
+    /// Scroll shell area to bottom (newest output)
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
     }
 
     /// Clear the command line

@@ -70,6 +70,12 @@ pub enum TaskResult {
         target: Side,
         error: String,
         display_name: String,
+        /// If true, the plugin requires a password (e.g., encrypted archive)
+        password_required: bool,
+        /// Source file path for retry (extension-mode plugins)
+        source_path: Option<PathBuf>,
+        /// Source file name for retry (extension-mode plugins)
+        source_name: Option<String>,
     },
     /// File operation completed
     FileOpCompleted(FileOpResult),
@@ -162,6 +168,9 @@ impl BackgroundTask {
                         target,
                         error: e.to_string(),
                         display_name,
+                        password_required: false,
+                        source_path: None,
+                        source_name: None,
                     });
                 }
             }
@@ -194,6 +203,8 @@ impl BackgroundTask {
         let sn = source_name.clone();
 
         let handle = thread::spawn(move || {
+            let sp_clone = sp.clone();
+            let sn_clone = sn.clone();
             match plugin.connect(&config) {
                 Ok(session) => {
                     let adapter = PluginProviderAdapter::new(session, &plugin_info);
@@ -208,10 +219,71 @@ impl BackgroundTask {
                     });
                 }
                 Err(e) => {
+                    let is_pw = matches!(&e, bark_plugin_api::ProviderError::PasswordRequired(_));
                     let _ = tx.send(TaskResult::PluginFailed {
                         target,
                         error: e.to_string(),
                         display_name,
+                        password_required: is_pw,
+                        source_path: Some(sp_clone),
+                        source_name: Some(sn_clone),
+                    });
+                }
+            }
+        });
+
+        BackgroundTask {
+            receiver: rx,
+            progress_rx: None,
+            _handle: handle,
+        }
+    }
+
+    /// Spawn a background extension-mode plugin connection with password (e.g., encrypted archive)
+    pub fn connect_extension_plugin_with_password(
+        plugin: Arc<dyn ProviderPlugin>,
+        source_path: PathBuf,
+        source_name: String,
+        target: Side,
+        password: String,
+    ) -> Self {
+        let (tx, rx) = channel::<TaskResult>();
+        let plugin_info = plugin.info().clone();
+        let display_name = source_name.clone();
+
+        let mut config = ProviderConfig::new();
+        config.set("path", source_path.to_string_lossy().to_string());
+        config.set("password", password);
+        config.name = source_name.clone();
+
+        let sp = source_path.clone();
+        let sn = source_name.clone();
+
+        let handle = thread::spawn(move || {
+            let sp_clone = sp.clone();
+            let sn_clone = sn.clone();
+            match plugin.connect(&config) {
+                Ok(session) => {
+                    let adapter = PluginProviderAdapter::new(session, &plugin_info);
+                    let _ = tx.send(TaskResult::PluginConnected {
+                        target,
+                        provider: Box::new(adapter),
+                        initial_path: "/".to_string(),
+                        display_name,
+                        is_extension_mode: true,
+                        source_path: Some(sp),
+                        source_name: Some(sn),
+                    });
+                }
+                Err(e) => {
+                    let is_pw = matches!(&e, bark_plugin_api::ProviderError::PasswordRequired(_));
+                    let _ = tx.send(TaskResult::PluginFailed {
+                        target,
+                        error: e.to_string(),
+                        display_name,
+                        password_required: is_pw,
+                        source_path: Some(sp_clone),
+                        source_name: Some(sn_clone),
                     });
                 }
             }

@@ -1,6 +1,6 @@
 //! Archive browsing logic
 //!
-//! Supports: zip, tar, tar.gz, tar.bz2, tar.xz, 7z, and single-file xz/gz/bz2
+//! Supports: zip, tar, tar.gz, tar.bz2, tar.xz, 7z, rar, and single-file xz/gz/bz2
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -25,6 +25,7 @@ pub enum ArchiveType {
     TarXz,
     Tar7z,
     SevenZip,
+    Rar,
     Xz,
     Gzip,
     Bzip2,
@@ -49,6 +50,8 @@ impl ArchiveType {
             Some(ArchiveType::Tar)
         } else if name.ends_with(".7z") {
             Some(ArchiveType::SevenZip)
+        } else if name.ends_with(".rar") {
+            Some(ArchiveType::Rar)
         } else if name.ends_with(".xz") {
             Some(ArchiveType::Xz)
         } else if name.ends_with(".gz") {
@@ -69,6 +72,7 @@ impl ArchiveType {
             ArchiveType::TarXz => "TAR.XZ",
             ArchiveType::Tar7z => "TAR.7Z",
             ArchiveType::SevenZip => "7Z",
+            ArchiveType::Rar => "RAR",
             ArchiveType::Xz => "XZ",
             ArchiveType::Gzip => "GZ",
             ArchiveType::Bzip2 => "BZ2",
@@ -85,6 +89,7 @@ impl ArchiveType {
             ".tar.7z".into(),
             ".tar".into(),
             ".7z".into(),
+            ".rar".into(),
             ".xz".into(),
             ".gz".into(),
             ".bz2".into(),
@@ -117,12 +122,13 @@ pub struct ArchiveSession {
     archive_type: ArchiveType,
     entries: Vec<ArchiveEntry>,
     display_name: String,
+    password: Option<String>,
 }
 
 #[allow(dead_code)]
 impl ArchiveSession {
-    /// Open an archive file
-    pub fn open(archive_path: PathBuf) -> Result<Self, String> {
+    /// Open an archive file, optionally with a password
+    pub fn open(archive_path: PathBuf, password: Option<String>) -> Result<Self, String> {
         let archive_type = ArchiveType::from_path(&archive_path)
             .ok_or_else(|| format!("Unknown archive type: {}", archive_path.display()))?;
 
@@ -137,6 +143,7 @@ impl ArchiveSession {
             archive_type,
             entries: Vec::new(),
             display_name,
+            password,
         };
 
         session.load_entries()?;
@@ -145,6 +152,10 @@ impl ArchiveSession {
 
     pub fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    pub fn set_password(&mut self, password: Option<String>) {
+        self.password = password;
     }
 
     pub fn short_label(&self) -> String {
@@ -160,6 +171,7 @@ impl ArchiveSession {
             ArchiveType::TarXz => self.load_tar_entries(Some(Compression::Xz))?,
             ArchiveType::Tar7z => self.load_tar7z_entries()?,
             ArchiveType::SevenZip => self.load_7z_entries()?,
+            ArchiveType::Rar => self.load_rar_entries()?,
             ArchiveType::Xz => self.load_single_file_entries(".xz"),
             ArchiveType::Gzip => self.load_single_file_entries(".gz"),
             ArchiveType::Bzip2 => self.load_single_file_entries(".bz2"),
@@ -177,8 +189,27 @@ impl ArchiveSession {
         let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for i in 0..archive.len() {
-            let file = archive.by_index(i)
-                .map_err(|e| format!("Failed to read ZIP entry: {}", e))?;
+            // Use by_index_decrypt when password is available, by_index otherwise
+            let file = if let Some(pw) = &self.password {
+                match archive.by_index_decrypt(i, pw.as_bytes()) {
+                    Ok(f) => f,
+                    Err(zip::result::ZipError::InvalidPassword) => {
+                        return Err("PASSWORD_REQUIRED:Wrong password".to_string());
+                    }
+                    Err(e) => return Err(format!("Failed to read ZIP entry: {}", e)),
+                }
+            } else {
+                match archive.by_index(i) {
+                    Ok(f) => f,
+                    Err(zip::result::ZipError::InvalidPassword) => {
+                        return Err("PASSWORD_REQUIRED:Archive is encrypted".to_string());
+                    }
+                    Err(zip::result::ZipError::UnsupportedArchive(ref msg)) if msg.contains("encrypted") || msg.contains("password") => {
+                        return Err("PASSWORD_REQUIRED:Archive is encrypted".to_string());
+                    }
+                    Err(e) => return Err(format!("Failed to read ZIP entry: {}", e)),
+                }
+            };
 
             let path = normalize_archive_path(file.name())
                 .trim_end_matches('/')
@@ -351,10 +382,25 @@ impl ArchiveSession {
     }
 
     fn load_7z_entries(&self) -> Result<Vec<ArchiveEntry>, String> {
+        let pw = match &self.password {
+            Some(p) => sevenz_rust::Password::from(p.as_str()),
+            None => sevenz_rust::Password::empty(),
+        };
         let reader = sevenz_rust::SevenZReader::open(
             &self.archive_path,
-            sevenz_rust::Password::empty(),
-        ).map_err(|e| format!("Failed to open 7z: {}", e))?;
+            pw,
+        ).map_err(|e| {
+            let msg = format!("{}", e);
+            if msg.contains("password") || msg.contains("Password") || msg.contains("decrypt") || msg.contains("BadPassword") {
+                if self.password.is_some() {
+                    format!("PASSWORD_REQUIRED:Wrong password")
+                } else {
+                    format!("PASSWORD_REQUIRED:Archive is encrypted")
+                }
+            } else {
+                format!("Failed to open 7z: {}", e)
+            }
+        })?;
 
         let archive_entries = &reader.archive().files;
 
@@ -419,10 +465,25 @@ impl ArchiveSession {
 
     /// Decompress a .tar.7z: extract the tar stream from the 7z, then parse as tar
     fn decompress_7z_to_bytes(&self) -> Result<Vec<u8>, String> {
+        let pw = match &self.password {
+            Some(p) => sevenz_rust::Password::from(p.as_str()),
+            None => sevenz_rust::Password::empty(),
+        };
         let mut reader = sevenz_rust::SevenZReader::open(
             &self.archive_path,
-            sevenz_rust::Password::empty(),
-        ).map_err(|e| format!("Failed to open 7z: {}", e))?;
+            pw,
+        ).map_err(|e| {
+            let msg = format!("{}", e);
+            if msg.contains("password") || msg.contains("Password") || msg.contains("decrypt") || msg.contains("BadPassword") {
+                if self.password.is_some() {
+                    format!("PASSWORD_REQUIRED:Wrong password")
+                } else {
+                    format!("PASSWORD_REQUIRED:Archive is encrypted")
+                }
+            } else {
+                format!("Failed to open 7z: {}", e)
+            }
+        })?;
 
         let mut tar_data: Option<Vec<u8>> = None;
 
@@ -455,6 +516,173 @@ impl ArchiveSession {
         let cursor = Cursor::new(tar_data);
         let mut archive = tar::Archive::new(cursor);
         Self::find_and_extract_tar_file(&mut archive, path)
+    }
+
+    fn load_rar_entries(&self) -> Result<Vec<ArchiveEntry>, String> {
+        let archive = if let Some(pw) = &self.password {
+            unrar::Archive::with_password(&self.archive_path, pw)
+                .open_for_listing()
+        } else {
+            unrar::Archive::new(&self.archive_path)
+                .open_for_listing()
+        }.map_err(|e| {
+            let msg = format!("{}", e);
+            if msg.contains("password") || msg.contains("Password") || msg.contains("encrypted") || msg.contains("ERAR_BAD_PASSWORD") || msg.contains("BadPassword") {
+                if self.password.is_some() {
+                    "PASSWORD_REQUIRED:Wrong password".to_string()
+                } else {
+                    "PASSWORD_REQUIRED:Archive is encrypted".to_string()
+                }
+            } else {
+                format!("Failed to open RAR: {}", e)
+            }
+        })?;
+
+        let mut entries = Vec::new();
+        let mut seen_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for entry_result in archive {
+            let header = entry_result
+                .map_err(|e| format!("Failed to read RAR entry: {}", e))?;
+
+            let path = normalize_archive_path(&header.filename.to_string_lossy())
+                .trim_end_matches('/')
+                .to_string();
+            if path.is_empty() || path == "." {
+                continue;
+            }
+
+            let is_dir = header.is_directory();
+            let size = header.unpacked_size;
+
+            // Convert DOS file_time to SystemTime
+            // DOS time format: bits 15-11=hours, 10-5=minutes, 4-0=seconds/2
+            // DOS date format: bits 15-9=year-1980, 8-5=month, 4-0=day
+            let modified = {
+                let ft = header.file_time as u64;
+                if ft > 0 {
+                    let time_part = (ft & 0xFFFF) as u32;
+                    let date_part = ((ft >> 16) & 0xFFFF) as u32;
+                    let second = ((time_part & 0x1F) * 2) as i64;
+                    let minute = ((time_part >> 5) & 0x3F) as i64;
+                    let hour = ((time_part >> 11) & 0x1F) as i64;
+                    let day = (date_part & 0x1F) as i64;
+                    let month = ((date_part >> 5) & 0x0F) as i64;
+                    let year = (((date_part >> 9) & 0x7F) + 1980) as i64;
+
+                    let days = {
+                        let y = if month <= 2 { year - 1 } else { year };
+                        let m = if month <= 2 { month + 9 } else { month - 3 };
+                        let c = y / 100;
+                        let ya = y - 100 * c;
+                        (146097 * c) / 4 + (1461 * ya) / 4 + (153 * m + 2) / 5 + day - 719469
+                    };
+                    let secs = days * 86400 + hour * 3600 + minute * 60 + second;
+                    if secs >= 0 {
+                        SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs as u64))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            // Add implicit parent directories
+            let mut current = String::new();
+            for component in path.split('/') {
+                if !current.is_empty() {
+                    current.push('/');
+                }
+                current.push_str(component);
+
+                if current != path && !seen_dirs.contains(&current) {
+                    seen_dirs.insert(current.clone());
+                    entries.push(ArchiveEntry {
+                        path: current.clone(),
+                        is_dir: true,
+                        size: 0,
+                        modified: None,
+                        permissions: 0,
+                    });
+                }
+            }
+
+            if !is_dir || !seen_dirs.contains(&path) {
+                if is_dir {
+                    seen_dirs.insert(path.clone());
+                }
+                entries.push(ArchiveEntry {
+                    path,
+                    is_dir,
+                    size,
+                    modified,
+                    permissions: header.file_attr,
+                });
+            }
+        }
+
+        Ok(entries)
+    }
+
+    fn extract_rar_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        let archive = if let Some(pw) = &self.password {
+            unrar::Archive::with_password(&self.archive_path, pw)
+                .open_for_processing()
+        } else {
+            unrar::Archive::new(&self.archive_path)
+                .open_for_processing()
+        }.map_err(|e| format!("Failed to open RAR: {}", e))?;
+
+        let target_path = normalize_archive_path(path)
+            .trim_end_matches('/')
+            .to_string();
+
+        let mut cursor = archive;
+        loop {
+            let header_result = cursor.read_header();
+            match header_result {
+                Ok(Some(header)) => {
+                    let entry_path = normalize_archive_path(&header.entry().filename.to_string_lossy())
+                        .trim_end_matches('/')
+                        .to_string();
+
+                    if entry_path == target_path {
+                        let (data, _next) = header.read()
+                            .map_err(|e| {
+                                let msg = format!("{}", e);
+                                if msg.contains("password") || msg.contains("Password") || msg.contains("encrypted") || msg.contains("BadPassword") || msg.contains("ERAR_BAD_PASSWORD") || msg.contains("BAD_DATA") {
+                                    if self.password.is_some() {
+                                        "PASSWORD_REQUIRED:Wrong password".to_string()
+                                    } else {
+                                        "PASSWORD_REQUIRED:File is encrypted".to_string()
+                                    }
+                                } else {
+                                    format!("Failed to extract: {}", e)
+                                }
+                            })?;
+                        return Ok(data);
+                    } else {
+                        cursor = header.skip()
+                            .map_err(|e| format!("Failed to skip entry: {}", e))?;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if msg.contains("password") || msg.contains("Password") || msg.contains("encrypted") || msg.contains("BadPassword") || msg.contains("ERAR_BAD_PASSWORD") {
+                        return Err(if self.password.is_some() {
+                            "PASSWORD_REQUIRED:Wrong password".to_string()
+                        } else {
+                            "PASSWORD_REQUIRED:File is encrypted".to_string()
+                        });
+                    }
+                    return Err(format!("Failed to read RAR header: {}", e));
+                }
+            }
+        }
+
+        Err(format!("File not found: {}", path))
     }
 
     fn load_single_file_entries(&self, extension: &str) -> Vec<ArchiveEntry> {
@@ -588,6 +816,7 @@ impl ArchiveSession {
             ArchiveType::TarXz => self.extract_tar_file(path, Some(Compression::Xz)),
             ArchiveType::Tar7z => self.extract_tar7z_file(path),
             ArchiveType::SevenZip => self.extract_7z_file(path),
+            ArchiveType::Rar => self.extract_rar_file(path),
             ArchiveType::Xz => self.extract_xz_file(),
             ArchiveType::Gzip => self.extract_gzip_file(),
             ArchiveType::Bzip2 => self.extract_bzip2_file(),
@@ -600,8 +829,16 @@ impl ArchiveSession {
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|e| format!("Failed to open ZIP: {}", e))?;
 
-        let mut zip_file = archive.by_name(path)
-            .map_err(|_| format!("File not found: {}", path))?;
+        let mut zip_file = if let Some(pw) = &self.password {
+            archive.by_name_decrypt(path, pw.as_bytes())
+                .map_err(|e| match e {
+                    zip::result::ZipError::InvalidPassword => "PASSWORD_REQUIRED:Wrong password".to_string(),
+                    _ => format!("File not found: {}", path),
+                })?
+        } else {
+            archive.by_name(path)
+                .map_err(|_| format!("File not found: {}", path))?
+        };
 
         let mut contents = Vec::new();
         zip_file.read_to_end(&mut contents)
@@ -663,9 +900,13 @@ impl ArchiveSession {
     }
 
     fn extract_7z_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        let pw = match &self.password {
+            Some(p) => sevenz_rust::Password::from(p.as_str()),
+            None => sevenz_rust::Password::empty(),
+        };
         let mut reader = sevenz_rust::SevenZReader::open(
             &self.archive_path,
-            sevenz_rust::Password::empty(),
+            pw,
         ).map_err(|e| format!("Failed to open 7z: {}", e))?;
 
         let target_path = normalize_archive_path(path)
@@ -731,7 +972,7 @@ mod tests {
         if !path.exists() {
             return; // skip if test archive not available
         }
-        let session = ArchiveSession::open(path).expect("Failed to open archive");
+        let session = ArchiveSession::open(path, None).expect("Failed to open archive");
         // Archive has 50 files + 12 folders = 62 entries
         assert_eq!(session.entries.len(), 62, "Expected 62 raw entries");
 
@@ -746,7 +987,7 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let session = ArchiveSession::open(path).expect("Failed to open archive");
+        let session = ArchiveSession::open(path, None).expect("Failed to open archive");
         let data = session.read_file("main.c").expect("Failed to read main.c");
         assert_eq!(data.len(), 4765, "main.c should be 4765 bytes");
     }

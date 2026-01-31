@@ -74,6 +74,7 @@ fn convert_error(e: ProviderPluginError) -> ProviderError {
         ProviderPluginError::Auth(s) => ProviderError::Auth(s),
         ProviderPluginError::NotFound(s) => ProviderError::NotFound(s),
         ProviderPluginError::PermissionDenied(s) => ProviderError::PermissionDenied(s),
+        ProviderPluginError::PasswordRequired(s) => ProviderError::PasswordRequired(s),
         ProviderPluginError::PluginError(s) => ProviderError::Other(s),
         ProviderPluginError::ConfigError(s) => ProviderError::Other(s),
         ProviderPluginError::Other(s) => ProviderError::Other(s),
@@ -176,5 +177,9 @@ impl PanelProvider for PluginProviderAdapter {
 
     fn from_local_path(&self, _path: &Path) -> Option<String> {
         None
+    }
+
+    fn set_password(&mut self, password: &str) -> crate::providers::ProviderResult<()> {
+        self.session.set_password(password).map_err(convert_error)
     }
 }

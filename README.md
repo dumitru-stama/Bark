@@ -11,7 +11,7 @@ A modern Norton Commander / Midnight Commander clone written in Rust with a focu
 
 - **Dual-panel file manager** with Brief (two-column) and Full (detailed) view modes
 - **Remote filesystem support** via SCP/SFTP and WebDAV/WebDAVS
-- **Archive browsing** - enter ZIP, TAR, TAR.7Z, 7z, and compressed archives as folders
+- **Archive browsing** - enter ZIP, TAR, TAR.7Z, 7z, RAR, and compressed archives as folders
 - **Integrated shell** with command history, output capture, and ANSI color support
 - **Built-in file viewer** with text and hex modes
 - **User Menu (F2)** for custom commands with hotkeys
@@ -39,8 +39,15 @@ cargo build --release
 ### Dependencies
 
 - Rust 2024 edition
-- For Linux: libc
+- For Linux: libc, `script` command (from `util-linux`)
 - For SCP/SFTP: libssh2 (via ssh2 crate)
+
+Install runtime dependencies automatically:
+```bash
+make setup-deps
+```
+
+> **Fedora note:** The `script` command (needed for TUI command output capture) is in a separate package: `sudo dnf install util-linux-script`
 
 ## Usage
 
@@ -96,6 +103,7 @@ Press `Enter` on any supported archive to browse its contents:
 - **ZIP** (.zip, .jar, .war, .apk)
 - **TAR** (.tar, .tar.gz, .tgz, .tar.bz2, .tbz2, .tar.xz, .txz, .tar.7z)
 - **7-Zip** (.7z)
+- **RAR** (.rar)
 - **Compressed files** (.xz, .gz, .bz2)
 
 Use `F5` to extract files to the other panel. Press `Esc` or navigate to `..` at root to exit.
@@ -126,7 +134,13 @@ Use `F5` to extract files to the other panel. Press `Esc` or navigate to `..` at
 | `:` | Enter command mode |
 | `Ctrl+O` | Toggle interactive shell mode |
 | `Shift+Up/Down` | Resize shell area |
+| `Ctrl+Up/Down` | Scroll shell output by one line |
+| `Ctrl+PgUp/PgDn` | Scroll shell output by 10 lines |
+| `Alt+Up/Down` | Scroll shell output by one line (macOS alternative) |
+| `Alt+PgUp/PgDn` | Scroll shell output by 10 lines (macOS alternative) |
 | `Alt+H` / `F9` | Command history panel |
+
+Alt+Arrow variants are provided because `Ctrl+Up/Down` triggers Mission Control on macOS.
 
 Commands are executed with full PTY support. TUI programs (vim, htop, etc.) are auto-detected and given full terminal access. Command output is captured and displayed in the shell area with ANSI color support.
 
@@ -193,6 +207,7 @@ left_view, right_view          Set view mode for specific panel
 shell_height                   Shell area height in lines
 panel_ratio, ratio             Panel width ratio (0-100)
 git, show_git, show_git_status Toggle git status in status bar
+dir_prefix, show_dir_prefix    Toggle directory prefix (/ or \)
 dirs_first, dirs_first_both    Directories listed before files
 uppercase_first                Uppercase-first sorting
 sort, sort_field               Sort field (name, ext, size, time)
@@ -218,6 +233,7 @@ view_mode = "brief"
 shell_height = 1
 panel_ratio = 50
 show_git_status = true
+show_dir_prefix = false  # Show / or \ before directory names
 
 [sorting]
 field = "name"
@@ -331,7 +347,7 @@ Plugins can be written in **any language** -- Rust, Python, Go, C, shell scripts
 |--------|------|-------------|
 | `bark-ftp` | Provider | FTP/FTPS file access |
 | `bark-webdav` | Provider | WebDAV/WebDAVS file access |
-| `bark-archive` | Provider | Browse ZIP, TAR, 7z, xz, gz, bz2 archives |
+| `bark-archive` | Provider | Browse ZIP, TAR, 7z, RAR, xz, gz, bz2 archives |
 | `bark-elf-viewer` | Viewer | ELF binary header inspector |
 | `system_status.py` | Status | System memory and CPU load (Python) |
 
@@ -401,7 +417,7 @@ Connect to WebDAV servers (including NextCloud, ownCloud):
 ### Linux/macOS
 - Full feature support
 - Uses PTY for proper terminal emulation
-- Captures command output using `script`
+- Captures command output using `script` (from `util-linux`; on Fedora: `sudo dnf install util-linux-script`)
 
 ### Windows
 - Drive selection with Alt+F1/F2 (or Alt+1/2)
@@ -429,20 +445,34 @@ cargo test
 make clean
 ```
 
-### Building on Windows
+### Building on Windows (Native)
 
-Install the standard Rust toolchain from [rustup.rs](https://rustup.rs/) (uses the MSVC target by default). Then build normally:
-
-```bash
-cargo build --release
-```
-
-### Cross-compiling for Windows from Linux/macOS
+Install the standard Rust toolchain from [rustup.rs](https://rustup.rs/) (uses the MSVC target `x86_64-pc-windows-msvc` by default). Then build normally:
 
 ```bash
-make setup      # Install mingw-w64 cross-compiler (one-time)
-make windows    # Cross-compile .exe binaries using x86_64-pc-windows-gnu
+cargo build --release --workspace
 ```
+
+This builds `ba.exe` and all plugins. No extra setup is needed — the MSVC toolchain includes all required headers and libraries.
+
+### Cross-Compiling for Windows from Linux/macOS
+
+```bash
+make setup      # Install mingw-w64 cross-compiler + Rust target (one-time)
+make windows    # Cross-compile all .exe binaries
+```
+
+Output binaries are in `target/x86_64-pc-windows-gnu/release/`.
+
+#### How it works
+
+Cross-compiling from Linux to Windows with mingw-w64 requires two workarounds that are already handled by the build system:
+
+1. **Header case-sensitivity.** The `unrar` C++ library includes Windows headers with mixed-case names (`PowrProf.h`, `Wbemidl.h`), but mingw-w64 ships them lowercase (`powrprof.h`, `wbemidl.h`). On Linux's case-sensitive filesystem, the compiler can't find them. The `plugins/archive-plugin/vendor/mingw-case-fix/` directory contains small wrapper headers that redirect to the correct lowercase names, and the Makefile passes them as an include path via `CXXFLAGS`.
+
+2. **`unrar_sys` build script bug.** The upstream `unrar_sys` crate (v0.5.8) uses `cfg!(windows)` in its `build.rs` to decide which source files to compile. This checks the *host* OS, not the *target* — so when cross-compiling from Linux, it skips Windows-only files (`isnt.cpp`) that define required symbols. A patched copy lives in `plugins/archive-plugin/vendor/unrar_sys/` and is applied automatically via `[patch.crates-io]` in the workspace `Cargo.toml`.
+
+Both workarounds are checked into the repo. `make windows` handles everything — no manual symlinks or patching needed.
 
 ## License
 

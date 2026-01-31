@@ -32,6 +32,8 @@ pub enum ProviderError {
     NotFound(String),
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
+    #[error("Password required: {0}")]
+    PasswordRequired(String),
     #[error("Not supported: {0}")]
     NotSupported(String),
     #[error("{0}")]
@@ -158,6 +160,13 @@ pub trait PanelProvider: Send {
     /// Returns None for remote providers
     #[allow(clippy::wrong_self_convention)]
     fn from_local_path(&self, path: &Path) -> Option<String>;
+
+    /// Set or update the password for this provider session.
+    /// Default is a no-op. Archive/encrypted providers should override this.
+    #[allow(unused_variables)]
+    fn set_password(&mut self, password: &str) -> ProviderResult<()> {
+        Ok(())
+    }
 }
 
 /// Source entry for the panel source selector

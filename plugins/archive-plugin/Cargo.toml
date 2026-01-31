@@ -2,7 +2,7 @@
 name = "bark-archive-plugin"
 version = "0.1.0"
 edition = "2024"
-description = "Archive provider plugin for Bark file manager (zip, tar, 7z, xz, gz, bz2)"
+description = "Archive provider plugin for Bark file manager (zip, tar, 7z, rar, xz, gz, bz2)"
 license = "MIT"
 
 [[bin]]
@@ -10,10 +10,11 @@ name = "bark-archive"
 path = "src/main.rs"
 
 [dependencies]
-bark-plugin-api = { path = "../plugin-api" }
+bark-plugin-api = { path = "../../plugin-api" }
 zip = "2.2"
 tar = "0.4"
 flate2 = "1.0"
 bzip2 = "0.5"
 xz2 = "0.1"
 sevenz-rust = "0.6"
+unrar = "0.5"

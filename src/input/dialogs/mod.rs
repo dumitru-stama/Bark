@@ -2,6 +2,7 @@
 //!
 //! Split into focused submodules for maintainability.
 
+mod archive_password;
 mod confirm;
 mod file_ops;
 mod plugin;
@@ -11,6 +12,7 @@ mod source;
 mod user_menu;
 mod viewer_search;
 
+pub use archive_password::handle_archive_password_prompt_mode;
 pub use confirm::{handle_confirming_mode, handle_overwrite_confirm_mode, handle_simple_confirm_mode};
 pub use file_ops::{handle_find_files_mode, handle_mkdir_mode, handle_select_files_mode};
 pub use plugin::handle_plugin_connect_mode;

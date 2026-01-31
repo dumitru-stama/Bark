@@ -1811,6 +1811,175 @@ pub fn scp_password_prompt_cursor_position(area: Rect, password_input: &str, cur
     (cursor_x, input_y)
 }
 
+/// Archive password prompt dialog (for encrypted archives)
+pub struct ArchivePasswordPromptDialog<'a> {
+    archive_name: &'a str,
+    password_input: &'a str,
+    focus: usize,
+    input_selected: bool,
+    error: Option<&'a str>,
+    theme: &'a Theme,
+}
+
+impl<'a> ArchivePasswordPromptDialog<'a> {
+    pub fn new(
+        archive_name: &'a str,
+        password_input: &'a str,
+        focus: usize,
+        input_selected: bool,
+        error: Option<&'a str>,
+        theme: &'a Theme,
+    ) -> Self {
+        Self {
+            archive_name,
+            password_input,
+            focus,
+            input_selected,
+            error,
+            theme,
+        }
+    }
+}
+
+impl Widget for ArchivePasswordPromptDialog<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let dialog_width = 50.min(area.width.saturating_sub(4));
+        let dialog_height = if self.error.is_some() { 11 } else { 9 };
+
+        if area.width < 30 || area.height < dialog_height {
+            return;
+        }
+
+        let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+
+        let dialog_area = Rect { x, y, width: dialog_width, height: dialog_height };
+
+        let bg_color = self.theme.dialog_move_bg;
+        let border_color = self.theme.dialog_move_border;
+
+        let border_style = Style::default().fg(border_color);
+        let title_style = Style::default().bg(bg_color).fg(self.theme.dialog_title).add_modifier(Modifier::BOLD);
+        let label_style = Style::default().bg(bg_color).fg(self.theme.dialog_text);
+        let input_style_focused = Style::default().bg(self.theme.dialog_input_focused_bg).fg(self.theme.dialog_input_focused_fg);
+        let input_style_selected = Style::default().bg(self.theme.dialog_input_selected_bg).fg(self.theme.dialog_input_selected_fg);
+        let input_style_unfocused = Style::default().bg(bg_color).fg(self.theme.dialog_input_unfocused_fg);
+        let button_style_focused = Style::default().fg(self.theme.dialog_button_focused_fg).bg(self.theme.dialog_button_focused_bg).add_modifier(Modifier::BOLD);
+        let button_style_unfocused = Style::default().fg(self.theme.dialog_button_unfocused).bg(bg_color);
+        let help_style = Style::default().bg(bg_color).fg(self.theme.dialog_help);
+        let error_style = Style::default().bg(bg_color).fg(Color::Red);
+
+        // Draw background
+        let bg_style = Style::default().bg(bg_color);
+        for row in dialog_area.y..dialog_area.y + dialog_area.height {
+            for col in dialog_area.x..dialog_area.x + dialog_area.width {
+                buf[(col, row)].set_char(' ').set_style(bg_style);
+            }
+        }
+
+        // Draw border
+        buf[(dialog_area.x, dialog_area.y)].set_char('╔').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y)].set_char('╗').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y)].set_char('═').set_style(border_style);
+        }
+
+        buf[(dialog_area.x, dialog_area.y + dialog_area.height - 1)].set_char('╚').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y + dialog_area.height - 1)].set_char('╝').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y + dialog_area.height - 1)].set_char('═').set_style(border_style);
+        }
+
+        for row in dialog_area.y + 1..dialog_area.y + dialog_area.height - 1 {
+            buf[(dialog_area.x, row)].set_char('║').set_style(border_style);
+            buf[(dialog_area.x + dialog_area.width - 1, row)].set_char('║').set_style(border_style);
+        }
+
+        // Title
+        let title = " Password Required ";
+        let title_x = dialog_area.x + (dialog_area.width.saturating_sub(title.len() as u16)) / 2;
+        buf.set_string(title_x, dialog_area.y, title, title_style);
+
+        let content_x = dialog_area.x + 2;
+        let content_width = dialog_area.width.saturating_sub(4) as usize;
+
+        // Archive name (line 2)
+        let archive_label = format!("Archive: {}", self.archive_name);
+        let truncated_label: String = archive_label.chars().take(content_width).collect();
+        buf.set_string(content_x, dialog_area.y + 2, &truncated_label, label_style);
+
+        // Password label (line 3)
+        buf.set_string(content_x, dialog_area.y + 3, "Password:", label_style);
+
+        // Password input field (line 4)
+        let input_y = dialog_area.y + 4;
+        let input_style = if self.focus == 0 {
+            if self.input_selected { input_style_selected } else { input_style_focused }
+        } else {
+            input_style_unfocused
+        };
+
+        for col in content_x..content_x + content_width as u16 {
+            buf[(col, input_y)].set_char(' ').set_style(input_style);
+        }
+
+        let max_display = content_width.saturating_sub(1);
+        let masked: String = "*".repeat(self.password_input.len().min(max_display));
+        buf.set_string(content_x, input_y, &masked, input_style);
+
+        // Error message if present (line 6)
+        let button_line_offset = if let Some(err) = self.error {
+            let err_y = dialog_area.y + 6;
+            let err_display: String = err.chars().take(content_width).collect();
+            buf.set_string(content_x, err_y, &err_display, error_style);
+            8
+        } else {
+            6
+        };
+
+        // Buttons
+        let button_y = dialog_area.y + button_line_offset;
+        let ok_text = "[ OK ]";
+        let cancel_text = "[ Cancel ]";
+
+        let ok_style = if self.focus == 1 { button_style_focused } else { button_style_unfocused };
+        let cancel_style = if self.focus == 2 { button_style_focused } else { button_style_unfocused };
+
+        let total_button_width = ok_text.len() + 4 + cancel_text.len();
+        let button_start_x = dialog_area.x + (dialog_area.width.saturating_sub(total_button_width as u16)) / 2;
+
+        buf.set_string(button_start_x, button_y, ok_text, ok_style);
+        buf.set_string(button_start_x + ok_text.len() as u16 + 4, button_y, cancel_text, cancel_style);
+
+        // Help text
+        let help_text = "Tab=Switch  Enter=Confirm  Esc=Cancel";
+        let help_x = dialog_area.x + (dialog_area.width.saturating_sub(help_text.len() as u16)) / 2;
+        buf.set_string(help_x, dialog_area.y + dialog_area.height - 2, help_text, help_style);
+    }
+}
+
+/// Calculate cursor position for the archive password prompt dialog
+pub fn archive_password_prompt_cursor_position(area: Rect, password_input: &str, cursor_pos: usize, has_error: bool) -> (u16, u16) {
+    let dialog_width = 50.min(area.width.saturating_sub(4));
+    let dialog_height = if has_error { 11 } else { 9 };
+
+    let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+
+    let content_x = x + 2;
+    let content_width = dialog_width.saturating_sub(4) as usize;
+    let input_y = y + 4;
+
+    let max_input_display = content_width.saturating_sub(1);
+    let cursor_x = if password_input.len() > max_input_display {
+        content_x + max_input_display as u16
+    } else {
+        content_x + cursor_pos.min(password_input.len()) as u16
+    };
+
+    (cursor_x, input_y)
+}
+
 /// Simple yes/no confirmation dialog
 pub struct SimpleConfirmDialog<'a> {
     message: &'a str,

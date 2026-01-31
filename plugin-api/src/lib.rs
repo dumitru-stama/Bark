@@ -441,6 +441,8 @@ pub enum ProviderError {
     NotFound(String),
     /// Permission denied
     PermissionDenied(String),
+    /// Password required (e.g., encrypted archive)
+    PasswordRequired(String),
     /// Plugin communication error
     PluginError(String),
     /// Configuration error
@@ -456,6 +458,7 @@ impl std::fmt::Display for ProviderError {
             ProviderError::Auth(s) => write!(f, "Authentication error: {}", s),
             ProviderError::NotFound(s) => write!(f, "Not found: {}", s),
             ProviderError::PermissionDenied(s) => write!(f, "Permission denied: {}", s),
+            ProviderError::PasswordRequired(s) => write!(f, "Password required: {}", s),
             ProviderError::PluginError(s) => write!(f, "Plugin error: {}", s),
             ProviderError::ConfigError(s) => write!(f, "Configuration error: {}", s),
             ProviderError::Other(s) => write!(f, "{}", s),
@@ -581,6 +584,13 @@ pub trait ProviderSession: Send {
     /// Join path components
     fn join_path(&self, base: &str, name: &str) -> String {
         format!("{}/{}", base.trim_end_matches('/'), name)
+    }
+
+    /// Set or update the password for this session (e.g., for encrypted archives).
+    /// Default is a no-op. Plugins that support passwords should override this.
+    #[allow(unused_variables)]
+    fn set_password(&mut self, password: &str) -> ProviderResult<()> {
+        Ok(())
     }
 }
 

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "plugins/plugin-api", "plugins/ftp-plugin", "plugins/elf-viewer", "plugins/archive-plugin", "plugins/webdav-plugin"]
+members = [".", "plugin-api", "plugins/ftp-plugin", "plugins/elf-viewer", "plugins/archive-plugin", "plugins/webdav-plugin"]
 resolver = "2"
 
 [package]
@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Plugin API (for adapters)
-bark-plugin-api = { path = "plugins/plugin-api" }
+bark-plugin-api = { path = "plugin-api" }
 
 # TUI
 ratatui = "0.29"
@@ -35,3 +35,14 @@ filetime = "0.2.27"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Patched unrar_sys for cross-compilation (see plugins/archive-plugin/vendor/unrar_sys/)
+[patch.crates-io]
+unrar_sys = { path = "plugins/archive-plugin/vendor/unrar_sys" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }

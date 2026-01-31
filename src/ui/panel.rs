@@ -290,7 +290,7 @@ impl<'a> PanelWidget<'a> {
             // Format the name with prefix/suffix
             // In temp mode, show full path instead of just name
             let mut name = String::new();
-            if entry.is_dir {
+            if entry.is_dir && panel.show_dir_prefix {
                 name.push(std::path::MAIN_SEPARATOR);
             }
             if let Some(p) = prefix {
@@ -394,7 +394,7 @@ impl<'a> PanelWidget<'a> {
             // Format name with prefix/suffix
             // In temp mode, show full path instead of just name
             let mut name = String::new();
-            if entry.is_dir {
+            if entry.is_dir && panel.show_dir_prefix {
                 name.push(std::path::MAIN_SEPARATOR);
             }
             if let Some(p) = prefix {

@@ -2,17 +2,13 @@
 //!
 //! Stage 6: Status bar and function keys
 
-use std::io::{self, stdout, Read, Write};
+use std::io::{self, stdout, Write};
 use std::panic;
-use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
-
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event},
+    event::{self, Event, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -34,12 +30,14 @@ mod plugins;
 mod providers;
 mod ui;
 mod utils;
+mod persistent_shell;
+mod win_console;
 
 use state::app::App;
 use state::mode::Mode;
 use state::Side;
-use ui::{CommandHistoryDialog, ConfirmDialog, SimpleConfirmDialog, SourceSelector, FileViewer, FindFilesDialog, HelpViewer, MkdirDialog, OverwriteConfirmDialog, PanelWidget, PluginViewer, ScpConnectDialog, ScpPasswordPromptDialog, SelectFilesDialog, ShellArea, SpinnerDialog, StatusBar, ViewerPluginMenu, ViewerSearchDialog, UserMenuDialog, UserMenuEditDialog, FileOpProgressDialog};
-use ui::dialog::{dialog_cursor_position, mkdir_cursor_position, find_files_pattern_cursor_position, find_files_content_cursor_position, find_files_path_cursor_position, viewer_search_text_cursor_position, viewer_search_hex_cursor_position, select_files_cursor_position, scp_connect_cursor_position, scp_password_prompt_cursor_position, user_menu_edit_cursor_position, PluginConnectDialog, plugin_connect_cursor_position};
+use ui::{ArchivePasswordPromptDialog, CommandHistoryDialog, ConfirmDialog, SimpleConfirmDialog, SourceSelector, FileViewer, FindFilesDialog, HelpViewer, MkdirDialog, OverwriteConfirmDialog, PanelWidget, PluginViewer, ScpConnectDialog, ScpPasswordPromptDialog, SelectFilesDialog, ShellArea, SpinnerDialog, StatusBar, ViewerPluginMenu, ViewerSearchDialog, UserMenuDialog, UserMenuEditDialog, FileOpProgressDialog};
+use ui::dialog::{archive_password_prompt_cursor_position, dialog_cursor_position, mkdir_cursor_position, find_files_pattern_cursor_position, find_files_content_cursor_position, find_files_path_cursor_position, viewer_search_text_cursor_position, viewer_search_hex_cursor_position, select_files_cursor_position, scp_connect_cursor_position, scp_password_prompt_cursor_position, user_menu_edit_cursor_position, PluginConnectDialog, plugin_connect_cursor_position};
 use input::get_help_text;
 
 /// Set up panic hook to restore terminal on panic
@@ -70,7 +68,12 @@ fn restore_terminal() -> io::Result<()> {
 
 /// Main event loop
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
+    // Spawn the persistent shell
+    app.init_shell();
+
     loop {
+        // Drain output from the persistent shell each iteration
+        app.poll_shell();
         // Draw the UI
         terminal.draw(|frame| {
             let size = frame.area();
@@ -78,6 +81,17 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             // Update terminal dimensions for shell area resizing and hex viewer
             app.ui.terminal_height = size.height;
             app.ui.terminal_width = size.width;
+
+            // Forward terminal size changes to the persistent PTY
+            // (only when dimensions actually change — on Windows ConPTY,
+            // redundant resize calls can trigger cmd.exe to redraw its banner)
+            if (size.width, size.height) != (app.ui.last_pty_cols, app.ui.last_pty_rows) {
+                app.ui.last_pty_cols = size.width;
+                app.ui.last_pty_rows = size.height;
+                if let Some(shell) = &app.shell {
+                    shell.resize(size.width, size.height);
+                }
+            }
 
             match &app.mode {
                 Mode::Viewing { content, scroll, path, binary_mode, search_matches, current_match } => {
@@ -239,7 +253,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         Side::Right => app.right_panel.path.to_string_lossy(),
                     };
                     let prompt = format!("{}> ", cwd);
-                    let shell_area = ShellArea::new(&app.cmd.output, &app.cmd.input, &prompt);
+                    let shell_area = ShellArea::new(&app.cmd.output, &app.cmd.input, &prompt, app.cmd.scroll_offset);
                     frame.render_widget(shell_area, main_chunks[2]);
 
                     // Position cursor for command mode (on the last line of shell area)
@@ -451,6 +465,32 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         }
                     }
 
+                    // Render archive password prompt dialog if in archive password mode (overlay)
+                    if let Mode::ArchivePasswordPrompt {
+                        archive_name,
+                        password_input,
+                        cursor_pos,
+                        focus,
+                        error,
+                        ..
+                    } = &app.mode
+                    {
+                        let dialog = ArchivePasswordPromptDialog::new(
+                            archive_name,
+                            password_input,
+                            *focus,
+                            app.ui.input_selected,
+                            error.as_deref(),
+                            &app.theme,
+                        );
+                        frame.render_widget(dialog, size);
+
+                        if *focus == 0 {
+                            let (cx, cy) = archive_password_prompt_cursor_position(size, password_input, *cursor_pos, error.is_some());
+                            frame.set_cursor_position((cx, cy));
+                        }
+                    }
+
                     // Render plugin connect dialog if in plugin connect mode (overlay)
                     if let Mode::PluginConnect {
                         plugin_name,
@@ -567,31 +607,171 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             let cwd = cwd.clone();
             app.mode = Mode::Normal;
 
-            // Check if command starts with ! for explicit full terminal access
-            let (explicit_interactive, actual_command) = if let Some(rest) = command.strip_prefix('!') {
-                (true, rest.trim().to_string())
-            } else {
-                (false, command)
-            };
+            // Strip optional ! prefix (legacy syntax, now all commands
+            // run on the real terminal).
+            let actual_command = command.strip_prefix('!')
+                .map(|s| s.trim().to_string())
+                .unwrap_or(command);
 
-            // Add command to shell history
+            // Echo command to shell area.
             let cmd_line = format!("{}> {}", cwd.display(), actual_command);
             app.add_shell_output(cmd_line);
 
-            // Run command with PTY and auto-detect TUI programs
-            run_command_with_pty_detection(
-                &actual_command,
-                &cwd,
-                explicit_interactive,
-                app,
-                terminal,
-            )?;
+            // ── Windows: run via .output() pipe capture ──
+            // ConPTY buffers screen-buffer output and doesn't flush to the
+            // reader pipe in real-time, so the persistent shell approach
+            // doesn't work for TUI commands.  Use .output() with pipe
+            // capture instead (same as how Unix uses `script` — each command
+            // runs in a fresh process, so env changes don't persist, matching
+            // Unix behaviour).
+            #[cfg(windows)]
+            {
+                let shell = persistent_shell::resolve_shell(&app.config.general.shell);
+                let flag = persistent_shell::shell_command_flag(&shell);
 
-            // Refresh panels
-            app.left_panel.refresh();
-            app.right_panel.refresh();
+                let result = std::process::Command::new(&shell)
+                    .arg(&flag)
+                    .arg(&actual_command)
+                    .current_dir(&cwd)
+                    .output();
+                match result {
+                    Ok(output) => {
+                        let stdout_text = String::from_utf8_lossy(&output.stdout);
+                        for line in stdout_text.lines() {
+                            let line = line.trim_end_matches('\r');
+                            if !line.is_empty() {
+                                app.add_shell_output(line.to_string());
+                            }
+                        }
+                        let stderr_text = String::from_utf8_lossy(&output.stderr);
+                        for line in stderr_text.lines() {
+                            let line = line.trim_end_matches('\r');
+                            if !line.is_empty() {
+                                app.add_shell_output(line.to_string());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        app.add_shell_output(format!("Error: {}", e));
+                    }
+                }
 
-            continue;
+                app.left_panel.refresh();
+                app.right_panel.refresh();
+
+                // Inject into persistent shell history so the command
+                // is available via Up arrow in Ctrl+O mode.
+                if app.shell.is_none() {
+                    app.init_shell();
+                }
+                if let Some(shell) = &mut app.shell {
+                    let _ = shell.inject_history(&actual_command, &cwd);
+                }
+                continue;
+            }
+
+            // ── Unix: run on real terminal with script for capture ──
+            #[cfg(not(windows))]
+            {
+                let shell = persistent_shell::resolve_shell(&app.config.general.shell);
+                let _flag = persistent_shell::shell_command_flag(&shell);
+
+                restore_terminal()?;
+                println!("{}> {}", cwd.display(), actual_command);
+
+                // Fish 4.1+ sends a Device Attributes query that hangs in PTYs
+                // that don't respond.  Disable it.
+                let is_fish = shell.to_lowercase().contains("fish");
+
+                // Fish uses `-c` for command strings; bash/zsh use `-ic`.
+                let shell_cmd_flag = if is_fish { "-c" } else { "-ic" };
+
+                #[cfg(target_os = "linux")]
+                let capture_file = {
+                    let tmp = format!("/tmp/bark_capture_{}", std::process::id());
+                    let inner = format!("{} {} {}",
+                        persistent_shell::shell_quote(&shell),
+                        shell_cmd_flag,
+                        persistent_shell::shell_quote(&actual_command));
+                    let mut cmd = std::process::Command::new("script");
+                    cmd.args(["-q", "-c", &inner, &tmp])
+                        .current_dir(&cwd);
+                    if is_fish { cmd.env("fish_features", "no-query-term"); }
+                    let status = cmd.status();
+                    if let Err(e) = status {
+                        app.add_shell_output(format!("Error: {}", e));
+                    }
+                    tmp
+                };
+
+                #[cfg(target_os = "macos")]
+                let capture_file = {
+                    // macOS BSD script: script -q <file> command [args...]
+                    // No -c flag on script itself.  Pass the shell with its
+                    // command flag so it executes the command.
+                    let tmp = format!("/tmp/bark_capture_{}", std::process::id());
+                    let mut cmd = std::process::Command::new("script");
+                    cmd.arg("-q")
+                        .arg(&tmp)
+                        .arg(&shell)
+                        .arg(shell_cmd_flag)
+                        .arg(&actual_command)
+                        .current_dir(&cwd);
+                    if is_fish { cmd.env("fish_features", "no-query-term"); }
+                    let status = cmd.status();
+                    if let Err(e) = status {
+                        app.add_shell_output(format!("Error: {}", e));
+                    }
+                    tmp
+                };
+
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                let capture_file = {
+                    let status = std::process::Command::new(&shell)
+                        .arg(_flag)
+                        .arg(&actual_command)
+                        .current_dir(&cwd)
+                        .status();
+                    if let Err(e) = status {
+                        app.add_shell_output(format!("Error: {}", e));
+                    }
+                    String::new()
+                };
+
+                // Read captured output into the shell area
+                if !capture_file.is_empty() {
+                    if let Ok(content) = std::fs::read_to_string(&capture_file) {
+                        // Skip TUI program output (alternate screen sequences)
+                        if !persistent_shell::is_tui_output(&content) {
+                            for line in content.lines() {
+                                let line = line.trim_end_matches('\r');
+                                let line = if let Some(pos) = line.rfind('\r') {
+                                    &line[pos + 1..]
+                                } else {
+                                    line
+                                };
+                                let clean = persistent_shell::strip_ansi(line);
+                                if clean.starts_with("Script started on ")
+                                    || clean.starts_with("Script done on ")
+                                    || clean.is_empty()
+                                {
+                                    continue;
+                                }
+                                app.add_shell_output(line.to_string());
+                            }
+                        }
+                    }
+                    let _ = std::fs::remove_file(&capture_file);
+                }
+
+                *terminal = setup_terminal()?;
+
+                // Refresh panels
+                app.left_panel.refresh();
+                app.right_panel.refresh();
+
+                continue;
+            }
         }
 
         // Check if we need to launch an external editor
@@ -662,43 +842,185 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             continue;
         }
 
-        // Check if shell toggle is active (Ctrl+O) - interactive shell mode with PTY
+        // Check if shell toggle is active (Ctrl+O) - interactive shell mode
         if matches!(app.mode, Mode::ShellVisible) {
-            // Get current directory
-            let cwd = match app.active_panel {
-                Side::Left => app.left_panel.path.clone(),
-                Side::Right => app.right_panel.path.clone(),
-            };
 
             // Clear any stray content if not in command mode
             if !app.cmd.focused {
                 app.cmd.input.clear();
             }
 
-            // Leave alternate screen to show terminal
-            disable_raw_mode()?;
-            execute!(stdout(), LeaveAlternateScreen, Show)?;
-
-            // Reset terminal attributes before printing history so
-            // leftover colors from Bark's UI don't bleed through
-            print!("\x1b[0m");
-            let _ = io::stdout().flush();
-
-            // Print shell history so user can see previous commands
-            for line in &app.cmd.output {
-                println!("{}", line);
+            // Ensure we have a persistent shell
+            if app.shell.is_none() {
+                app.init_shell();
             }
 
-            // Run interactive shell with PTY, capture output
-            let captured_lines = run_interactive_shell(&cwd, &app.config.general.shell)?;
-            for line in captured_lines {
-                app.add_shell_output(line);
+            if let Some(shell) = &mut app.shell {
+                // Leave alternate screen to show the primary buffer
+                disable_raw_mode()?;
+                execute!(stdout(), LeaveAlternateScreen, Show)?;
+                print!("\x1b[0m");
+                let _ = io::stdout().flush();
+
+                // Detect shell type for platform-specific behaviour.
+                let shell_lower = shell.shell_name().to_lowercase();
+                let is_powershell = shell_lower.contains("powershell")
+                    || shell_lower.contains("pwsh");
+
+                // Clear startup suppression so Ctrl+O output is captured.
+                shell.suppress_output.store(false, std::sync::atomic::Ordering::Relaxed);
+
+                if is_powershell {
+                    // PowerShell: skip replay.  ConPTY's virtual screen
+                    // buffer uses cursor-positioning sequences that would
+                    // overwrite replayed content.  Just enter shell mode;
+                    // TUI command history is still available via
+                    // Ctrl+Up/Down in the TUI.
+                    shell.set_visible(true);
+                } else {
+                    // cmd.exe and other shells: replay TUI command history
+                    // on the primary screen.  Replay BEFORE set_visible so
+                    // ConPTY redraw doesn't overwrite it.
+                    print!("\x1b[2J\x1b[H"); // clear + home
+                    for line in &app.cmd.output {
+                        println!("{}", line);
+                    }
+                    let _ = io::stdout().flush();
+
+                    shell.set_visible(true);
+                }
+
+                // Unix: send an empty Enter so the shell displays a fresh
+                // prompt.  Runs after set_visible so the user sees it.
+                // The reader thread captures the response as OutputLine,
+                // which the drain loop filters out (ANSI-heavy prompt).
+                #[cfg(not(windows))]
+                { let _ = shell.send_command(""); }
+
+                // Forward stdin to the persistent shell until Ctrl+O
+                persistent_shell::run_forwarding_loop(shell)?;
+
+                // Drain channel messages accumulated during Ctrl+O.
+                // InputTracked (from write_bytes): always keep.
+                // OutputLine (from reader thread): keep only real
+                // command output.  Terminal rendering noise (prompts,
+                // fish/zsh ⏎ indicator, syntax redraws) contains
+                // cursor positioning (\x1b[NC, \x1b[N;NH) or mid-line
+                // \r — real command output doesn't.
+                // Windows: ConPTY redraws the entire screen buffer when
+                // entering Ctrl+O shell mode, and PowerShell sends
+                // incremental syntax-highlighting echoes per keystroke.
+                // All of this arrives as OutputLine BEFORE the first
+                // InputTracked.  Collect all messages, then only emit
+                // OutputLine that appears after an InputTracked.
+                #[cfg(windows)]
+                {
+                    let mut drained: Vec<persistent_shell::ShellMessage> = Vec::new();
+                    while let Ok(msg) = shell.receiver.try_recv() {
+                        drained.push(msg);
+                    }
+
+                    // Find first InputTracked index — everything before
+                    // it is ConPTY redraw noise or char echo garbage.
+                    let first_input = drained.iter().position(|m| {
+                        matches!(m, persistent_shell::ShellMessage::InputTracked(_))
+                    });
+
+                    for (i, msg) in drained.into_iter().enumerate() {
+                        match msg {
+                            persistent_shell::ShellMessage::InputTracked(line) => {
+                                // The last output line may be a bare prompt
+                                // (e.g. "C:\path>") that is a prefix of this
+                                // InputTracked line ("C:\path> whoami").
+                                // Replace it to avoid a double-prompt.
+                                if let Some(last) = app.cmd.output.last() {
+                                    let trimmed = last.trim_end();
+                                    if !trimmed.is_empty() && line.starts_with(trimmed) {
+                                        let last_idx = app.cmd.output.len() - 1;
+                                        app.cmd.output[last_idx] = line;
+                                    } else {
+                                        app.cmd.add_output(line);
+                                    }
+                                } else {
+                                    app.cmd.add_output(line);
+                                }
+                            }
+                            persistent_shell::ShellMessage::OutputLine(line) => {
+                                let dominated = first_input.map_or(true, |fi| i < fi);
+                                if dominated {
+                                    continue;
+                                }
+                                let is_noise = line.contains("\x1b[?2004h")
+                                    || has_cursor_move(&line);
+                                let stripped = persistent_shell::strip_ansi(&line);
+                                if !is_noise && stripped.len() > 1 {
+                                    app.cmd.add_output(stripped);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // The last OutputLine is typically the next cmd.exe
+                    // prompt (e.g. "C:\path>") that ConPTY renders after
+                    // the command finishes.  This is redundant because the
+                    // next InputTracked will include it.  Pop it if it
+                    // looks like a bare prompt (ends with ">").
+                    if let Some(last) = app.cmd.output.last() {
+                        let trimmed = last.trim_end();
+                        let ends_gt = trimmed.ends_with('>');
+                        let has_space = trimmed.contains(' ');
+                        let starts_ps = trimmed.starts_with("PS ");
+                        if ends_gt && (!has_space || starts_ps) {
+                            app.cmd.output.pop();
+                        }
+                    }
+                }
+
+                // Unix: no ConPTY redraw issue — filter inline as before.
+                #[cfg(not(windows))]
+                while let Ok(msg) = shell.receiver.try_recv() {
+                    match msg {
+                        persistent_shell::ShellMessage::InputTracked(line) => {
+                            app.cmd.add_output(line);
+                        }
+                        persistent_shell::ShellMessage::OutputLine(line) => {
+                            // Fish/zsh prompt redraws and syntax
+                            // highlighting contain cursor-forward
+                            // sequences (\x1b[NC) that real command
+                            // output never has.  Also filter bracket
+                            // paste mode toggles (\x1b[?2004h).
+                            let is_noise = line.contains("\x1b[?2004h")
+                                || has_cursor_move(&line);
+                            let stripped = persistent_shell::strip_ansi(&line);
+                            if !is_noise && stripped.len() > 1 {
+                                app.cmd.add_output(stripped);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                shell.set_visible(false);
+
+                // Flush stale console input events and ensure VT processing
+                win_console::flush_console_input();
+                win_console::ensure_vt_processing();
+
+                // Return to alternate screen
+                execute!(stdout(), EnterAlternateScreen, Hide)?;
+                enable_raw_mode()?;
+                terminal.clear()?;
+
+                // After set_visible(false), ConPTY sends redraw noise as
+                // it re-renders its screen buffer.  Wait for it to settle,
+                // then discard the noise.
+                std::thread::sleep(Duration::from_millis(300));
+                if let Some(ref shell) = app.shell {
+                    while shell.receiver.try_recv().is_ok() {}
+                }
             }
 
-            // Return to alternate screen
-            execute!(stdout(), EnterAlternateScreen, Hide)?;
-            enable_raw_mode()?;
-            terminal.clear()?;
             app.mode = Mode::Normal;
             app.cmd.focused = false;
 
@@ -730,6 +1052,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
         if event::poll(poll_timeout)?
             && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
         {
             input::handle_key(app, key);
         }
@@ -737,500 +1060,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         if app.should_quit {
             // Save state before exiting
             app.save_state();
+            // Shut down the persistent shell
+            if let Some(shell) = app.shell.take() {
+                shell.shutdown();
+            }
             break;
         }
     }
     Ok(())
-}
-
-/// Check if buffer contains alternate screen buffer escape sequence
-#[allow(dead_code)]
-fn has_alternate_screen(buf: &[u8]) -> bool {
-    // Look for \x1b[?1049h or \x1b[?47h or \x1b[?1047h
-    for i in 0..buf.len().saturating_sub(4) {
-        if buf[i] == 0x1b && buf.get(i + 1) == Some(&b'[') && buf.get(i + 2) == Some(&b'?') {
-            let rest = &buf[i + 3..];
-            // Check for 1049h
-            if rest.starts_with(b"1049h") {
-                return true;
-            }
-            // Check for 1047h
-            if rest.starts_with(b"1047h") {
-                return true;
-            }
-            // Check for 47h
-            if rest.starts_with(b"47h") {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Strip ANSI escape sequences from text
-fn strip_ansi(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Skip escape sequence
-            if let Some(&next) = chars.peek() {
-                if next == '[' {
-                    chars.next();
-                    // Skip until we hit a letter or ~
-                    while let Some(&ch) = chars.peek() {
-                        chars.next();
-                        if ch.is_ascii_alphabetic() || ch == '~' {
-                            break;
-                        }
-                    }
-                    continue;
-                } else if next == ']' {
-                    // OSC sequence - skip until BEL or ST
-                    chars.next();
-                    while let Some(ch) = chars.next() {
-                        if ch == '\x07' {
-                            break;
-                        }
-                        if ch == '\x1b'
-                            && chars.peek() == Some(&'\\') {
-                                chars.next();
-                                break;
-                            }
-                    }
-                    continue;
-                }
-            }
-        } else if c == '\r' {
-            // Skip carriage returns
-            continue;
-        }
-        result.push(c);
-    }
-
-    result
-}
-
-/// Check if output looks like it came from a TUI program
-/// TUI programs typically clear the screen or exit alternate buffer when done
-fn is_tui_output(content: &str) -> bool {
-    // Look for terminal reset/clear sequences anywhere in output
-    // These indicate a full-screen TUI program was running
-
-    // ESC[?1049l - exit alternate screen buffer (most common)
-    if content.contains("\x1b[?1049l") {
-        return true;
-    }
-    // ESC[?1049h - enter alternate screen buffer
-    if content.contains("\x1b[?1049h") {
-        return true;
-    }
-    // ESC[?47l / ESC[?47h - older alternate screen
-    if content.contains("\x1b[?47l") || content.contains("\x1b[?47h") {
-        return true;
-    }
-    // ESC[2J - clear entire screen
-    if content.contains("\x1b[2J") {
-        return true;
-    }
-    // ESC c - full terminal reset (RIS)
-    if content.contains("\x1bc") {
-        return true;
-    }
-    // ESC[H followed by ESC[J - home cursor + clear
-    if content.contains("\x1b[H\x1b[J") {
-        return true;
-    }
-
-    false
-}
-
-/// Run a command directly in terminal, capture output for shell area
-fn run_command_with_pty_detection(
-    command: &str,
-    cwd: &Path,
-    _force_interactive: bool,
-    app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> io::Result<()> {
-    let shell = resolve_shell(&app.config.general.shell);
-    let shell_arg = shell_command_flag(&shell);
-
-    // Leave alternate screen so user sees the terminal
-    restore_terminal()?;
-
-    // Echo the command so user sees what's being run (like a normal shell)
-    println!("{}> {}", cwd.display(), command);
-
-    // Use script command to capture output while still allowing interaction
-    // Note: script -c syntax varies by platform and may not exist on BusyBox/minimal systems
-    #[cfg(target_os = "linux")]
-    let (capture_cmd, capture_file) = {
-        let tmp = format!("/tmp/rc_capture_{}", std::process::id());
-        // Check if script supports -c (util-linux vs BusyBox)
-        let script_supports_c = std::process::Command::new("script")
-            .arg("--help")
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("-c"))
-            .unwrap_or(false);
-        if script_supports_c {
-            // Use the user's shell with -ic so aliases (like ls --color) are loaded
-            let inner = format!("{} -ic {}", shell_quote(&shell), shell_quote(command));
-            (format!("script -q -c {} {}", shell_quote(&inner), &tmp), tmp)
-        } else {
-            // Fallback: use Python's pty module (available on virtually all Linux systems)
-            let py_script = format!(
-                r#"import pty,os,sys;f=open('{}','wb')
-def r(fd):
- d=os.read(fd,1024);f.write(d);sys.stdout.buffer.write(d);sys.stdout.buffer.flush();return d
-pty.spawn([{},'-ic',{}],r);f.close()"#,
-                &tmp,
-                python_quote(&shell),
-                python_quote(command)
-            );
-            (format!("python3 -c {}", shell_quote(&py_script)), tmp)
-        }
-    };
-
-    #[cfg(target_os = "macos")]
-    let (capture_cmd, capture_file) = {
-        let tmp = format!("/tmp/rc_capture_{}", std::process::id());
-        // macOS BSD script: script -q <file> command [args...]
-        // No -c flag on macOS. Use the user's shell with -ic so aliases are loaded.
-        (format!("script -q {} {} -ic {}", &tmp, &shell, shell_quote(command)), tmp)
-    };
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let (capture_cmd, capture_file) = (command.to_string(), String::new());
-
-    // Run the command
-    let cmd_to_run = if capture_file.is_empty() { command } else { &capture_cmd };
-
-    let status = std::process::Command::new(&shell)
-        .arg(shell_arg)
-        .arg(cmd_to_run)
-        .current_dir(cwd)
-        .status();
-
-    // Read captured output if available - store ALL lines
-    if !capture_file.is_empty() {
-        if let Ok(content) = std::fs::read_to_string(&capture_file) {
-            // Check if this looks like TUI output (has screen clear/reset at end)
-            // If so, discard all output from this command
-            if !is_tui_output(&content) {
-                for line in content.lines() {
-                    // First strip trailing \r (handles \r\n line endings)
-                    let line = line.trim_end_matches('\r');
-
-                    // Handle carriage returns: keep only content after last \r
-                    // This simulates terminal behavior for progress indicators
-                    let line = if let Some(pos) = line.rfind('\r') {
-                        &line[pos + 1..]
-                    } else {
-                        line
-                    };
-
-                    // Skip script command header/footer lines
-                    let clean = strip_ansi(line);
-                    if clean.starts_with("Script started on ") || clean.starts_with("Script done on ") {
-                        continue;
-                    }
-                    // Skip empty lines (check stripped version)
-                    if clean.is_empty() {
-                        continue;
-                    }
-                    // Keep the original line with ANSI codes for colored output
-                    app.add_shell_output(line.to_string());
-                }
-            }
-        }
-        let _ = std::fs::remove_file(&capture_file);
-    }
-
-    // Return to TUI
-    *terminal = setup_terminal()?;
-
-    if let Err(e) = status {
-        app.add_shell_output(format!("Error: {}", e));
-    }
-
-    Ok(())
-}
-
-/// Quote a command for shell
-#[cfg(unix)]
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace("'", "'\\''"))
-}
-
-/// Quote a string for embedding in a Python string literal
-#[cfg(target_os = "linux")]
-fn python_quote(s: &str) -> String {
-    let escaped = s
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    format!("'{}'", escaped)
-}
-
-/// Resolve which shell to use. If `configured` is non-empty, use it directly.
-/// Otherwise auto-detect: on Windows pwsh > powershell > cmd.exe, on Unix $SHELL > /bin/sh.
-fn resolve_shell(configured: &str) -> String {
-    if !configured.is_empty() {
-        return configured.to_string();
-    }
-    if cfg!(windows) {
-        // Prefer modern PowerShell (pwsh) first
-        if std::process::Command::new("pwsh").arg("-Version").output().is_ok() {
-            return "pwsh".to_string();
-        }
-        // Then Windows PowerShell
-        if std::process::Command::new("powershell").arg("-Version").output().is_ok() {
-            return "powershell".to_string();
-        }
-        // Fall back to COMSPEC / cmd.exe
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-    }
-}
-
-/// Determine the right shell argument flag for running a command
-fn shell_command_flag(shell: &str) -> &'static str {
-    let lower = shell.to_lowercase();
-    if lower.contains("powershell") || lower.contains("pwsh") {
-        "-Command"
-    } else if cfg!(windows) {
-        "/C"
-    } else {
-        "-c"
-    }
-}
-
-/// Run an interactive shell with PTY support (for tab completion, etc.)
-/// Returns captured output lines when user presses Ctrl+O
-fn run_interactive_shell(cwd: &Path, shell_config: &str) -> io::Result<Vec<String>> {
-    // Get terminal size
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-
-    // Create PTY system
-    let pty_system = native_pty_system();
-
-    // Open a PTY pair
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| io::Error::other(e.to_string()))?;
-
-    // Build the shell command
-    let shell = resolve_shell(shell_config);
-
-    let mut cmd = CommandBuilder::new(&shell);
-    cmd.cwd(cwd);
-
-    // Spawn the shell
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| io::Error::other(e.to_string()))?;
-
-    // Get reader/writer for the PTY master
-    let mut reader = pair.master.try_clone_reader()
-        .map_err(|e| io::Error::other(e.to_string()))?;
-    let mut writer = pair.master.take_writer()
-        .map_err(|e| io::Error::other(e.to_string()))?;
-
-    // Set raw mode via libc and configure for poll()-based reading.
-    // We use raw byte forwarding (no crossterm event reader) so terminal
-    // responses flow transparently from the real terminal to the shell.
-    #[cfg(unix)]
-    let orig_termios = unsafe {
-        let mut orig: libc::termios = std::mem::zeroed();
-        libc::tcgetattr(libc::STDIN_FILENO, &mut orig);
-        let mut raw = orig;
-        libc::cfmakeraw(&mut raw);
-        // VMIN=0, VTIME=0: read returns immediately (non-blocking via termios)
-        raw.c_cc[libc::VMIN] = 0;
-        raw.c_cc[libc::VTIME] = 0;
-        libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &raw);
-        orig
-    };
-    #[cfg(not(unix))]
-    enable_raw_mode()?;
-
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = Arc::clone(&running);
-
-    // Shared buffer to capture PTY output for shell history
-    let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let captured_clone = Arc::clone(&captured);
-
-    // Spawn thread to read from PTY, write to stdout, and capture output.
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        let mut stdout = io::stdout();
-        while running_clone.load(Ordering::Relaxed) {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let _ = stdout.write_all(&buf[..n]);
-                    let _ = stdout.flush();
-                    if let Ok(mut cap) = captured_clone.lock() {
-                        cap.extend_from_slice(&buf[..n]);
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // Main loop: use poll() to wait for stdin data, then read raw bytes.
-    // Fully transparent - all bytes (including terminal responses) flow
-    // from the real terminal through to the shell via the PTY.
-    // Ctrl+O (0x0F) is detected to return to Bark.
-    'shell_loop: loop {
-        // Check if child process has exited
-        if let Ok(Some(_)) = child.try_wait() {
-            break;
-        }
-
-        #[cfg(unix)]
-        {
-            // Wait for stdin to have data (50ms timeout)
-            let mut pfd = libc::pollfd {
-                fd: libc::STDIN_FILENO,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ret = unsafe { libc::poll(&mut pfd, 1, 50) };
-            if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
-                let mut buf = [0u8; 4096];
-                let n = unsafe {
-                    libc::read(
-                        libc::STDIN_FILENO,
-                        buf.as_mut_ptr() as *mut libc::c_void,
-                        buf.len(),
-                    )
-                };
-                if n > 0 {
-                    let data = &buf[..n as usize];
-                    // Check for Ctrl+O to return to Bark.
-                    // Traditional encoding: raw byte 0x0F
-                    // Kitty keyboard protocol: ESC[111;5u (used by iTerm2 + fish)
-                    if data.contains(&0x0F) || data.windows(8).any(|w| w == b"\x1b[111;5u") {
-                        break 'shell_loop;
-                    }
-                    let _ = writer.write_all(data);
-                    let _ = writer.flush();
-                } else if n == 0 {
-                    break; // EOF
-                }
-                // n < 0: read error, just retry
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            if crossterm::event::poll(Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    let ctrl = key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
-                    if ctrl && matches!(key.code, crossterm::event::KeyCode::Char('o' | 'O')) {
-                        break 'shell_loop;
-                    }
-                    let bytes: Vec<u8> = match key.code {
-                        crossterm::event::KeyCode::Char(c) if ctrl => {
-                            vec![(c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1)]
-                        }
-                        crossterm::event::KeyCode::Char(c) => {
-                            let mut b = [0u8; 4];
-                            let s = c.encode_utf8(&mut b);
-                            s.as_bytes().to_vec()
-                        }
-                        crossterm::event::KeyCode::Enter => vec![b'\r'],
-                        crossterm::event::KeyCode::Backspace => vec![127],
-                        crossterm::event::KeyCode::Tab => vec![b'\t'],
-                        crossterm::event::KeyCode::Esc => vec![27],
-                        _ => vec![],
-                    };
-                    if !bytes.is_empty() {
-                        let _ = writer.write_all(&bytes);
-                        let _ = writer.flush();
-                    }
-                }
-            }
-        }
-    }
-
-    // Restore terminal settings
-    #[cfg(unix)]
-    unsafe {
-        libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &orig_termios);
-    }
-    #[cfg(not(unix))]
-    disable_raw_mode()?;
-
-    // Signal thread to stop
-    running.store(false, Ordering::Relaxed);
-
-    // Kill child process first to make everything close
-    let _ = child.kill();
-
-    // Drop the writer to close the write end of PTY
-    drop(writer);
-
-    // Drop the master PTY - this closes the PTY and should unblock the reader thread
-    drop(pair.master);
-
-    // Brief pause to let things settle
-    std::thread::sleep(Duration::from_millis(100));
-
-    // Non-blocking wait for child (don't block if it hasn't exited yet)
-    let _ = child.try_wait();
-
-    // Wait for reader thread to finish so all output is captured
-    let _ = stdout_handle.join();
-
-    print!("\r\n");
-    let _ = io::stdout().flush();
-
-    // Convert captured bytes into lines for shell history.
-    // Unlike single-command capture, we don't filter TUI output here —
-    // the interactive shell may use screen clears, alternate buffer, etc.
-    // as part of normal operation (e.g., fish shell init).
-    let raw = captured.lock().unwrap_or_else(|e| e.into_inner());
-    let content = String::from_utf8_lossy(&raw);
-    let mut lines = Vec::new();
-
-    for line in content.lines() {
-        let line = line.trim_end_matches('\r');
-
-        // Handle carriage returns: keep only content after last \r
-        let line = if let Some(pos) = line.rfind('\r') {
-            &line[pos + 1..]
-        } else {
-            line
-        };
-
-        let clean = strip_ansi(line);
-        if clean.is_empty() {
-            continue;
-        }
-
-        lines.push(line.to_string());
-    }
-
-    Ok(lines)
 }
 
 /// Path to the instance lock file
@@ -1302,7 +1139,9 @@ fn confirm_duplicate_instance(
         })?;
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+            if let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
                 match key.code {
                     crossterm::event::KeyCode::Char('y') | crossterm::event::KeyCode::Char('Y') => {
                         return Ok(true);
@@ -1325,6 +1164,29 @@ fn confirm_duplicate_instance(
             }
         }
     }
+}
+
+/// Returns true if the line contains cursor-positioning escape sequences
+/// (cursor forward `\x1b[NC` or absolute position `\x1b[N;NH`), which
+/// indicate terminal prompt rendering rather than real command output.
+fn has_cursor_move(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] == 0x1b && bytes[i + 1] == b'[' {
+            i += 2;
+            // Skip digits and semicolons
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b';') {
+                i += 1;
+            }
+            if i < bytes.len() && (bytes[i] == b'C' || bytes[i] == b'H') {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 fn main() -> io::Result<()> {

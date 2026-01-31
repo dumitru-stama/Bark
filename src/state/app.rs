@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::git::{self, GitStatus};
+use crate::persistent_shell::{PersistentShell, ShellMessage};
 use crate::plugins::{PluginManager, StatusContext, ViewerContext};
 use crate::providers::{PanelSource, ProviderType, ScpAuth, ScpConnectionInfo, get_panel_sources};
 use crate::ui::Theme;
@@ -62,6 +63,10 @@ pub struct App {
     pub background_task: Option<super::background::BackgroundTask>,
     /// Cancel token for file operations (shared with background thread)
     pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
+    // === Persistent shell ===
+    /// Persistent PTY shell (lives for app lifetime)
+    pub shell: Option<PersistentShell>,
 }
 
 impl App {
@@ -152,6 +157,10 @@ impl App {
         // Apply show_hidden setting
         left_panel.show_hidden = config.general.show_hidden;
         right_panel.show_hidden = config.general.show_hidden;
+
+        // Apply show_dir_prefix setting
+        left_panel.show_dir_prefix = config.display.show_dir_prefix;
+        right_panel.show_dir_prefix = config.display.show_dir_prefix;
         if config.general.show_hidden {
             left_panel.refresh();
             right_panel.refresh();
@@ -196,6 +205,48 @@ impl App {
             dir_sizes: std::collections::HashMap::new(),
             background_task: None,
             cancel_token: None,
+            shell: None,
+        }
+    }
+
+    /// Spawn the persistent shell.  Safe to call multiple times (respawns if dead).
+    pub fn init_shell(&mut self) {
+        let cwd = match self.active_panel {
+            Side::Left => &self.left_panel.path,
+            Side::Right => &self.right_panel.path,
+        };
+        match PersistentShell::spawn(cwd, &self.config.general.shell) {
+            Ok(s) => self.shell = Some(s),
+            Err(e) => {
+                self.add_shell_output(format!("Failed to start shell: {}", e));
+            }
+        }
+    }
+
+    /// Drain pending messages from the persistent shell's reader thread.
+    pub fn poll_shell(&mut self) {
+        let shell_alive;
+        {
+            let Some(shell) = &mut self.shell else { return };
+            shell_alive = shell.is_alive();
+
+            // Drain all available messages (non-blocking).
+            while let Ok(msg) = shell.receiver.try_recv() {
+                match msg {
+                    ShellMessage::OutputLine(line)
+                    | ShellMessage::InputTracked(line) => {
+                        self.cmd.add_output(line);
+                    }
+                    ShellMessage::ShellExited => {
+                        self.cmd.add_output("[Shell exited]".to_string());
+                    }
+                }
+            }
+        }
+
+        // If shell died, drop it so we can respawn on next command.
+        if !shell_alive {
+            self.shell = None;
         }
     }
 
@@ -890,6 +941,19 @@ impl App {
                 format!("show_git_status = {}", new_val)
             }
 
+            "dir_prefix" | "show_dir_prefix" => {
+                let new_val = match value {
+                    Some("true") | Some("1") | Some("on") | Some("yes") => true,
+                    Some("false") | Some("0") | Some("off") | Some("no") => false,
+                    None => !self.config.display.show_dir_prefix, // Toggle
+                    _ => return format!("Invalid value for {}: use true/false", option),
+                };
+                self.config.display.show_dir_prefix = new_val;
+                self.left_panel.show_dir_prefix = new_val;
+                self.right_panel.show_dir_prefix = new_val;
+                format!("show_dir_prefix = {}", new_val)
+            }
+
             "dirs_first" => {
                 let current_val = self.active_panel().sort_config.dirs_first;
                 let new_val = match value {
@@ -1057,6 +1121,9 @@ impl App {
         // Sync hidden
         self.config.general.show_hidden = self.left_panel.show_hidden;
 
+        // Sync dir prefix
+        self.config.display.show_dir_prefix = self.left_panel.show_dir_prefix;
+
         // Sync sorting
         self.config.sorting.field = match self.left_panel.sort_config.field {
             SortField::Name => "name",
@@ -1116,6 +1183,10 @@ impl App {
         self.right_panel.show_hidden = self.config.general.show_hidden;
         self.left_panel.refresh();
         self.right_panel.refresh();
+
+        // Apply dir prefix
+        self.left_panel.show_dir_prefix = self.config.display.show_dir_prefix;
+        self.right_panel.show_dir_prefix = self.config.display.show_dir_prefix;
 
         // Apply shell height
         self.ui.shell_height = self.config.display.shell_height.max(1);
@@ -2416,6 +2487,86 @@ impl App {
         };
     }
 
+    /// Connect to an encrypted archive with the password from the dialog
+    pub fn connect_archive_with_password(&mut self) {
+        use super::background::BackgroundTask;
+
+        let Mode::ArchivePasswordPrompt {
+            target_panel,
+            archive_path,
+            archive_name,
+            password_input,
+            retry_path,
+            ..
+        } = &self.mode else {
+            return;
+        };
+
+        let target = *target_panel;
+        let path = archive_path.clone();
+        let name = archive_name.clone();
+        let password = password_input.clone();
+        let retry = retry_path.clone();
+
+        // If retry_path is set, we're already inside the archive and just need
+        // to update the password on the live session, then retry the file view.
+        if let Some(file_path) = retry {
+            let panel = match target {
+                Side::Left => &mut self.left_panel,
+                Side::Right => &mut self.right_panel,
+            };
+            if let Err(e) = panel.set_provider_password(&password) {
+                self.mode = Mode::ArchivePasswordPrompt {
+                    target_panel: target,
+                    archive_path: path,
+                    archive_name: name,
+                    password_input: String::new(),
+                    cursor_pos: 0,
+                    focus: 0,
+                    error: Some(format!("Failed to set password: {}", e)),
+                    retry_path: Some(file_path),
+                };
+                return;
+            }
+            // Password set successfully — retry viewing the file
+            self.mode = Mode::Normal;
+            self.view_file_remote(&file_path);
+            // If view_file_remote hit another PasswordRequired, it will have
+            // set the mode to ArchivePasswordPrompt with "Wrong password".
+            // Detect that and set the error message.
+            if let Mode::ArchivePasswordPrompt { error, .. } = &mut self.mode {
+                if error.is_none() {
+                    *error = Some("Wrong password".to_string());
+                }
+            }
+            return;
+        }
+
+        // Connect-time failure: reconnect the entire archive with password
+        let plugin = self.plugins.find_provider_by_extension(&path);
+
+        let Some(plugin) = plugin else {
+            self.add_shell_output(format!("No plugin found for {}", name));
+            self.mode = Mode::Normal;
+            return;
+        };
+
+        let task = BackgroundTask::connect_extension_plugin_with_password(
+            plugin,
+            path,
+            name.clone(),
+            target,
+            password,
+        );
+
+        self.background_task = Some(task);
+        self.mode = Mode::BackgroundTask {
+            title: "Opening".to_string(),
+            message: format!("Opening {}...", name),
+            frame: 0,
+        };
+    }
+
     // ========================================================================
     // PLUGIN CONNECTIONS (generic for any provider plugin)
     // ========================================================================
@@ -2800,8 +2951,7 @@ impl App {
     /// View a remote file (fully loaded into memory)
     fn view_file_remote(&mut self, path: &std::path::Path) {
         let path_str = path.to_string_lossy().to_string();
-        let bytes_result = self.active_panel_mut().read_file(&path_str)
-            .map_err(std::io::Error::other);
+        let bytes_result = self.active_panel_mut().read_file(&path_str);
 
         match bytes_result {
             Ok(bytes) => {
@@ -2831,6 +2981,27 @@ impl App {
                 }
             }
             Err(e) => {
+                // Check if this is a password_required error from an archive provider
+                let is_password_required = matches!(
+                    &e,
+                    crate::errors::AppError::Provider(crate::providers::ProviderError::PasswordRequired(_))
+                );
+                if is_password_required {
+                    let target = self.active_panel;
+                    if let Some((archive_path, archive_name)) = self.active_panel().archive_source() {
+                        self.mode = Mode::ArchivePasswordPrompt {
+                            target_panel: target,
+                            archive_path,
+                            archive_name,
+                            password_input: String::new(),
+                            cursor_pos: 0,
+                            focus: 0,
+                            error: None,
+                            retry_path: Some(path.to_path_buf()),
+                        };
+                        return;
+                    }
+                }
                 self.active_panel_mut().error = Some(format!(
                     "Cannot read '{}': {}",
                     path.to_string_lossy(),
@@ -3289,10 +3460,15 @@ impl App {
                         Side::Right => &mut self.right_panel,
                     };
                     if is_extension_mode {
-                        // Extension-mode: enter like an archive (preserves parent state for ESC exit)
-                        let sp = source_path.unwrap_or_else(|| std::path::PathBuf::from(&initial_path));
-                        let sn = source_name.unwrap_or_else(|| display_name.clone());
-                        panel.switch_to_extension_provider(provider, &sp, &sn);
+                        if panel.is_in_archive() {
+                            // Already inside an archive — reconnect in place (e.g., after entering password)
+                            panel.reconnect_extension_provider(provider);
+                        } else {
+                            // Entering an archive for the first time
+                            let sp = source_path.unwrap_or_else(|| std::path::PathBuf::from(&initial_path));
+                            let sn = source_name.unwrap_or_else(|| display_name.clone());
+                            panel.switch_to_extension_provider(provider, &sp, &sn);
+                        }
                     } else {
                         // Scheme-mode: regular provider switch
                         panel.set_provider(provider, &initial_path);
@@ -3300,9 +3476,33 @@ impl App {
                     }
                     self.mode = Mode::Normal;
                 }
-                TaskResult::PluginFailed { error, display_name, .. } => {
-                    self.add_shell_output(format!("Connection to {} failed: {}", display_name, error));
-                    self.mode = Mode::Normal;
+                TaskResult::PluginFailed { target, error, display_name, password_required, source_path, source_name } => {
+                    if password_required {
+                        if let (Some(path), Some(name)) = (source_path, source_name) {
+                            // Extract a user-friendly error message for wrong password retries
+                            let err_msg = if error.contains("Wrong password") {
+                                Some("Wrong password".to_string())
+                            } else {
+                                None
+                            };
+                            self.mode = Mode::ArchivePasswordPrompt {
+                                target_panel: target,
+                                archive_path: path,
+                                archive_name: name,
+                                password_input: String::new(),
+                                cursor_pos: 0,
+                                focus: 0,
+                                error: err_msg,
+                                retry_path: None,
+                            };
+                        } else {
+                            self.add_shell_output(format!("Connection to {} failed: {}", display_name, error));
+                            self.mode = Mode::Normal;
+                        }
+                    } else {
+                        self.add_shell_output(format!("Connection to {} failed: {}", display_name, error));
+                        self.mode = Mode::Normal;
+                    }
                 }
                 TaskResult::FileOpCompleted(result) => {
                     self.cancel_token = None;

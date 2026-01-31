@@ -65,6 +65,7 @@ fn handle_command(json: &str) -> String {
         "disconnect" => handle_disconnect(),
         "list_directory" => handle_list_directory(json),
         "read_file" => handle_read_file(json),
+        "set_password" => handle_set_password(json),
         "write_file" => r#"{"error":"Archives are read-only","error_type":"permission"}"#.to_string(),
         "delete" => r#"{"error":"Archives are read-only","error_type":"permission"}"#.to_string(),
         "mkdir" => r#"{"error":"Archives are read-only","error_type":"permission"}"#.to_string(),
@@ -75,19 +76,29 @@ fn handle_command(json: &str) -> String {
 }
 
 fn handle_connect(json: &str) -> String {
-    // Extract the archive path from config
+    // Extract the archive path and optional password from config
     let path = extract_config_value(json, "path").unwrap_or_default();
+    let password = extract_config_value(json, "password");
 
     if path.is_empty() {
         return r#"{"success":false,"error":"No archive path provided"}"#.to_string();
     }
 
-    match ArchiveSession::open(PathBuf::from(&path)) {
+    match ArchiveSession::open(PathBuf::from(&path), password.clone()) {
         Ok(session) => {
             let label = session.short_label();
             let mut guard = SESSION.lock().unwrap();
             *guard = Some(session);
             format!(r#"{{"success":true,"session_id":"default","short_label":"{}"}}"#, escape_json(&label))
+        }
+        Err(e) if e.starts_with("PASSWORD_REQUIRED:") => {
+            let msg = &e["PASSWORD_REQUIRED:".len()..];
+            let error_msg = if password.is_some() && !msg.contains("Wrong") {
+                "Wrong password"
+            } else {
+                msg
+            };
+            format!(r#"{{"success":false,"error":"{}","error_type":"password_required"}}"#, escape_json(error_msg))
         }
         Err(e) => format!(r#"{{"success":false,"error":"{}"}}"#, escape_json(&e)),
     }
@@ -148,7 +159,24 @@ fn handle_read_file(json: &str) -> String {
             let b64 = base64_encode(&data);
             format!(r#"{{"data":"{}"}}"#, b64)
         }
+        Err(e) if e.starts_with("PASSWORD_REQUIRED:") => {
+            let msg = &e["PASSWORD_REQUIRED:".len()..];
+            format!(r#"{{"error":"{}","error_type":"password_required"}}"#, escape_json(msg))
+        }
         Err(e) => format!(r#"{{"error":"{}","error_type":"not_found"}}"#, escape_json(&e)),
+    }
+}
+
+fn handle_set_password(json: &str) -> String {
+    let password = extract_string(json, "password").unwrap_or_default();
+
+    let mut guard = SESSION.lock().unwrap();
+    match guard.as_mut() {
+        Some(session) => {
+            session.set_password(if password.is_empty() { None } else { Some(password) });
+            r#"{"success":true}"#.to_string()
+        }
+        None => r#"{"error":"Not connected"}"#.to_string(),
     }
 }
 

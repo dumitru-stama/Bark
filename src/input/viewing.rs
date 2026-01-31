@@ -346,6 +346,13 @@ RESIZING
   Shift+Left   Shrink left panel / grow right panel
   Shift+Right  Grow left panel / shrink right panel
 
+SHELL AREA SCROLLING
+====================
+  Ctrl+Up/Down      Scroll shell output by one line
+  Ctrl+PgUp/PgDn    Scroll shell output by 10 lines
+  Alt+Up/Down       Same (macOS: Ctrl+Up triggers Mission Control)
+  Alt+PgUp/PgDn     Same
+
 COMMANDS
 ========
   :            Enter command mode (type shell commands)

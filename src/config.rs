@@ -259,6 +259,8 @@ pub struct DisplayConfig {
     pub show_git_status: bool,
     /// Date format: "relative" or "absolute"
     pub date_format: String,
+    /// Show directory prefix (/ on Unix, \ on Windows) before folder names
+    pub show_dir_prefix: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -438,6 +440,7 @@ impl Default for DisplayConfig {
             panel_ratio: 50,
             show_git_status: true,
             date_format: "absolute".to_string(),
+            show_dir_prefix: false,
         }
     }
 }
@@ -573,6 +576,11 @@ run_executables = true
 # When false, use :config-save to save manually
 autosave = false
 
+# Shell to use for Ctrl+O interactive shell (leave empty for auto-detect)
+# Auto-detect: Unix uses $SHELL or /bin/sh; Windows tries pwsh > powershell > cmd.exe
+# Examples: "bash", "zsh", "fish", "pwsh", "cmd.exe"
+shell = ""
+
 [display]
 # Default view mode: "brief" (two columns) or "full" (detailed list)
 view_mode = "brief"
@@ -588,6 +596,9 @@ show_git_status = true
 
 # Date format: "absolute" (2024-01-15 10:30) or "relative" (2 hours ago)
 date_format = "absolute"
+
+# Show directory prefix (/ or \\) before folder names
+show_dir_prefix = false
 
 [sorting]
 # Sort field: "name", "extension", "size", "modified", "unsorted"
@@ -999,6 +1010,7 @@ impl Config {
             display["panel_ratio"] = value(self.display.panel_ratio as i64);
             display["show_git_status"] = value(self.display.show_git_status);
             display["date_format"] = value(&self.display.date_format);
+            display["show_dir_prefix"] = value(self.display.show_dir_prefix);
         }
 
         // Update [sorting] section

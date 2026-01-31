@@ -21,6 +21,10 @@ pub struct UiState {
     /// Whether the current text input field has its content selected
     /// (typing will replace all content). Set on Tab into a field with content.
     pub input_selected: bool,
+    /// Last PTY columns sent to resize (avoid redundant ConPTY resizes on Windows)
+    pub last_pty_cols: u16,
+    /// Last PTY rows sent to resize (avoid redundant ConPTY resizes on Windows)
+    pub last_pty_rows: u16,
 }
 
 impl Default for UiState {
@@ -33,6 +37,8 @@ impl Default for UiState {
             shell_height: 1,
             left_panel_percent: 50,
             input_selected: false,
+            last_pty_cols: 0,
+            last_pty_rows: 0,
         }
     }
 }

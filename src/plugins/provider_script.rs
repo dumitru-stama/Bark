@@ -309,7 +309,11 @@ impl ProviderPlugin for ScriptProviderPlugin {
         } else {
             let error = extract_json_string(&response, "error")
                 .unwrap_or_else(|| "Connection failed".to_string());
-            Err(ProviderPluginError::Connection(error))
+            let error_type = extract_json_string(&response, "error_type");
+            match error_type.as_deref() {
+                Some("password_required") => Err(ProviderPluginError::PasswordRequired(error)),
+                _ => Err(ProviderPluginError::Connection(error)),
+            }
         }
     }
 }
@@ -387,6 +391,7 @@ impl ScriptProviderSession {
                     "not_found" => ProviderPluginError::NotFound(error),
                     "permission" => ProviderPluginError::PermissionDenied(error),
                     "connection" => ProviderPluginError::Connection(error),
+                    "password_required" => ProviderPluginError::PasswordRequired(error),
                     _ => ProviderPluginError::Other(error),
                 });
             }
@@ -579,6 +584,12 @@ impl ProviderSession for ScriptProviderSession {
 
     fn home_path(&self) -> String {
         self.home_path.clone()
+    }
+
+    fn set_password(&mut self, password: &str) -> ProviderPluginResult<()> {
+        let args = format!("\"password\":\"{}\"", escape_json(password));
+        self.execute_command("set_password", &args)?;
+        Ok(())
     }
 }
 

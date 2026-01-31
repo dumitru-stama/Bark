@@ -385,6 +385,25 @@ pub enum Mode {
         /// Focused button: 0=Yes, 1=All, 2=Skip, 3=SkipAll, 4=Cancel
         focus: usize,
     },
+    /// Password prompt for encrypted archive
+    ArchivePasswordPrompt {
+        /// Target panel
+        target_panel: Side,
+        /// Path to the archive file
+        archive_path: PathBuf,
+        /// Display name of the archive
+        archive_name: String,
+        /// Password input
+        password_input: String,
+        /// Cursor position
+        cursor_pos: usize,
+        /// Focused element: 0 = input, 1 = OK, 2 = Cancel
+        focus: usize,
+        /// Error message (e.g., "Wrong password")
+        error: Option<String>,
+        /// File path to retry viewing after password is set (for encrypted-files archives)
+        retry_path: Option<PathBuf>,
+    },
     /// File operation progress dialog
     FileOpProgress {
         /// Title (e.g., "Copying" or "Moving")
