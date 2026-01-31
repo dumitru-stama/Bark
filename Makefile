@@ -34,7 +34,7 @@ setup-deps:
 		sudo apt-get update && sudo apt-get install -y bsdutils libssh2-1-dev; \
 	elif command -v dnf >/dev/null 2>&1; then \
 		echo "Detected Fedora/RHEL..."; \
-		sudo dnf install -y util-linux-script libssh2-devel; \
+		sudo dnf install -y util-linux-script libssh2-devel gcc-c++; \
 	elif command -v pacman >/dev/null 2>&1; then \
 		echo "Detected Arch..."; \
 		sudo pacman -S --needed util-linux libssh2; \
@@ -55,7 +55,7 @@ setup-cross:
 		sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64; \
 	elif command -v dnf >/dev/null 2>&1; then \
 		echo "Detected Fedora/RHEL — installing mingw64-gcc..."; \
-		sudo dnf install -y mingw64-gcc; \
+		sudo dnf install -y mingw64-gcc mingw64-gcc-c++; \
 	elif command -v pacman >/dev/null 2>&1; then \
 		echo "Detected Arch — installing mingw-w64-gcc..."; \
 		sudo pacman -S --needed mingw-w64-gcc; \
