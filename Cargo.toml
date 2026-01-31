@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "plugin-api", "plugins/ftp-plugin", "plugins/elf-viewer", "plugins/archive-plugin", "plugins/webdav-plugin"]
+members = [".", "plugin-api", "plugins/ftp-plugin", "plugins/elf-viewer", "plugins/pe-viewer", "plugins/archive-plugin", "plugins/webdav-plugin", "plugins/image-viewer", "plugins/pdf-viewer"]
 resolver = "2"
 
 [package]

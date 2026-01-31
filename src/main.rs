@@ -71,11 +71,19 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
     // Spawn the persistent shell
     app.init_shell();
 
+    let mut needs_redraw = true;
+
     loop {
         // Drain output from the persistent shell each iteration
-        app.poll_shell();
-        // Draw the UI
-        terminal.draw(|frame| {
+        let shell_had_output = app.poll_shell();
+        if shell_had_output {
+            needs_redraw = true;
+        }
+
+        // Draw the UI (only when something changed)
+        if needs_redraw {
+            needs_redraw = false;
+            terminal.draw(|frame| {
             let size = frame.area();
 
             // Update terminal dimensions for shell area resizing and hex viewer
@@ -117,9 +125,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         buf.set_string(status_x, status_y, &status, status_style);
                     }
                 }
-                Mode::ViewingPlugin { plugin_name, path, scroll, lines, total_lines } => {
+                Mode::ViewingPlugin { plugin_name, path, scroll, lines, total_lines, status_message } => {
                     // Full-screen plugin viewer
-                    let viewer = PluginViewer::new(plugin_name, path, lines, *scroll, *total_lines, &app.theme);
+                    let viewer = PluginViewer::new(plugin_name, path, lines, *scroll, *total_lines, status_message.as_deref(), &app.theme);
                     app.ui.viewer_height = PluginViewer::content_height(size);
                     frame.render_widget(viewer, size);
                 }
@@ -600,6 +608,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 }
             }
         })?;
+        } // needs_redraw
 
         // Check if we need to run a command
         if let Mode::RunningCommand { command, cwd } = &app.mode {
@@ -667,6 +676,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 if let Some(shell) = &mut app.shell {
                     let _ = shell.inject_history(&actual_command, &cwd);
                 }
+                needs_redraw = true;
                 continue;
             }
 
@@ -770,6 +780,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 app.left_panel.refresh();
                 app.right_panel.refresh();
 
+                needs_redraw = true;
                 continue;
             }
         }
@@ -839,6 +850,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 ));
             }
 
+            needs_redraw = true;
             continue;
         }
 
@@ -1028,33 +1040,44 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             app.left_panel.refresh();
             app.right_panel.refresh();
 
+            needs_redraw = true;
             continue;
         }
 
         // Poll for background task completion and tick spinner
+        let has_animation = matches!(app.mode, Mode::BackgroundTask { .. } | Mode::FileOpProgress { .. });
         if matches!(app.mode, Mode::BackgroundTask { .. }) {
             app.poll_background_task();
             app.tick_spinner();
+            needs_redraw = true;
         }
 
         // Poll file operation progress
         if matches!(app.mode, Mode::FileOpProgress { .. }) {
             app.poll_file_operation();
             app.tick_spinner();
+            needs_redraw = true;
         }
 
-        // Use shorter poll timeout for background tasks / file ops (smoother animation)
-        let poll_timeout = if matches!(app.mode, Mode::BackgroundTask { .. } | Mode::FileOpProgress { .. }) {
+        // Use shorter poll timeout for animations (spinner),
+        // otherwise block until an event arrives.
+        let poll_timeout = if has_animation {
             Duration::from_millis(50)
         } else {
-            Duration::from_millis(100)
+            Duration::from_secs(5)
         };
 
-        if event::poll(poll_timeout)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            input::handle_key(app, key);
+        if event::poll(poll_timeout)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    input::handle_key(app, key);
+                    needs_redraw = true;
+                }
+                Event::Resize(_, _) => {
+                    needs_redraw = true;
+                }
+                _ => {}
+            }
         }
 
         if app.should_quit {

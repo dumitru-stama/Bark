@@ -257,16 +257,24 @@ fn extract_json_string_array(json: &str, key: &str) -> Option<Vec<String>> {
         return None;
     }
 
-    // Find matching ]
+    // Find matching ] — must skip brackets inside JSON strings
     let mut depth = 0;
     let mut end = 0;
-    for (i, c) in rest.chars().enumerate() {
+    let mut in_str = false;
+    let mut esc = false;
+    for (i, c) in rest.char_indices() {
+        if esc {
+            esc = false;
+            continue;
+        }
         match c {
-            '[' => depth += 1,
-            ']' => {
+            '\\' if in_str => esc = true,
+            '"' => in_str = !in_str,
+            '[' if !in_str => depth += 1,
+            ']' if !in_str => {
                 depth -= 1;
                 if depth == 0 {
-                    end = i + 1;
+                    end = i + c.len_utf8();
                     break;
                 }
             }
@@ -278,7 +286,7 @@ fn extract_json_string_array(json: &str, key: &str) -> Option<Vec<String>> {
         return None;
     }
 
-    let array_str = &rest[1..end - 1];
+    let array_str = &rest['['.len_utf8()..end - ']'.len_utf8()];
     let mut result = Vec::new();
     let mut current = String::new();
     let mut in_string = false;

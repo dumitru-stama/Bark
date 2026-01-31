@@ -158,6 +158,8 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             let path = entry.path.clone();
             if entry.is_dir {
                 app.compute_dir_size(&path);
+            } else if app.config.general.view_plugin_first {
+                app.view_file_with_plugins(&path);
             } else {
                 app.view_file(&path);
             }

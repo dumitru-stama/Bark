@@ -244,6 +244,9 @@ pub struct GeneralConfig {
     pub last_left_view: Option<String>,
     /// Last right panel view mode (auto-saved)
     pub last_right_view: Option<String>,
+    /// Try plugin viewers before built-in viewer on F3
+    #[serde(default)]
+    pub view_plugin_first: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,17 +402,45 @@ pub fn default_keybinding(action: &str) -> &'static str {
         "page_up_vim" => "Ctrl+B",
         "page_down_vim" => "Ctrl+F",
 
+        // Viewer
+        "viewer_save" => "Ctrl+S",
+
         // Unknown action
         _ => "",
     }
 }
 
+/// Returns the platform-appropriate default open command
+fn default_open_command() -> &'static str {
+    #[cfg(target_os = "linux")]
+    { "setsid xdg-open {}" }
+    #[cfg(target_os = "macos")]
+    { "open {}" }
+    #[cfg(target_os = "windows")]
+    { "explorer {}" }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    { "setsid xdg-open {}" }
+}
+
 /// Default file handlers
 pub fn default_handlers() -> Vec<FileHandler> {
+    let cmd = default_open_command().to_string();
     vec![
         FileHandler {
-            pattern: r"\.(jpg|jpeg|png|gif|bmp|webp|svg|ico)$".to_string(),
-            command: "xviewer {}".to_string(),
+            pattern: r"\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff|tif|avif)$".to_string(),
+            command: cmd.clone(),
+        },
+        FileHandler {
+            pattern: r"\.(mp4|mkv|avi|mov|webm|flv|wmv|m4v)$".to_string(),
+            command: cmd.clone(),
+        },
+        FileHandler {
+            pattern: r"\.(mp3|flac|ogg|wav|aac|wma|m4a|opus)$".to_string(),
+            command: cmd.clone(),
+        },
+        FileHandler {
+            pattern: r"\.pdf$".to_string(),
+            command: cmd,
         },
     ]
 }
@@ -428,6 +459,7 @@ impl Default for GeneralConfig {
             last_right_path: None,
             last_left_view: None,
             last_right_view: None,
+            view_plugin_first: false,
         }
     }
 }
@@ -553,7 +585,9 @@ pub fn save_command_history(history: &[String]) {
 }
 
 /// Default config file content with comments
-const DEFAULT_CONFIG: &str = r##"# Bark Configuration
+fn default_config() -> String {
+    let open_cmd = default_open_command();
+    format!(r##"# Bark Configuration
 # This file is auto-generated. Edit as needed.
 
 [general]
@@ -580,6 +614,11 @@ autosave = false
 # Auto-detect: Unix uses $SHELL or /bin/sh; Windows tries pwsh > powershell > cmd.exe
 # Examples: "bash", "zsh", "fish", "pwsh", "cmd.exe"
 shell = ""
+
+# Try plugin viewers before built-in viewer when pressing F3
+# When false (default), F3 opens the built-in hex/text viewer; use F2 to pick a plugin
+# When true, F3 tries matching plugins first and falls back to the built-in viewer
+view_plugin_first = false
 
 [display]
 # Default view mode: "brief" (two columns) or "full" (detailed list)
@@ -848,34 +887,37 @@ preset = "dark"
 # ## Vim-style navigation
 # page_up_vim = "Ctrl+B"          # Page up (vim)
 # page_down_vim = "Ctrl+F"        # Page down (vim)
+#
+# ## Viewer
+# viewer_save = "Ctrl+S"           # Save plugin viewer output to file
 
 # File handlers: map file patterns to commands
 # Pattern is a regex matched against the filename
-# Command uses {} as placeholder for the full file path
+# Command uses {{}} as placeholder for the full file path
 # First matching handler wins
 
-# Default handler for images
+# Default handlers (open with OS default application)
 [[handlers]]
-pattern = "\\.(jpg|jpeg|png|gif|bmp|webp|svg|ico)$"
-command = "xviewer {}"
+pattern = "\\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff|tif|avif)$"
+command = "{open_cmd}"
 
-# Add more handlers below (uncomment or add your own):
-#
-# [[handlers]]
-# pattern = "\\.(mp4|mkv|avi|mov|webm)$"
-# command = "vlc {}"
-#
-# [[handlers]]
-# pattern = "\\.(mp3|flac|ogg|wav)$"
-# command = "vlc {}"
-#
-# [[handlers]]
-# pattern = "\\.pdf$"
-# command = "evince {}"
+[[handlers]]
+pattern = "\\.(mp4|mkv|avi|mov|webm|flv|wmv|m4v)$"
+command = "{open_cmd}"
+
+[[handlers]]
+pattern = "\\.(mp3|flac|ogg|wav|aac|wma|m4a|opus)$"
+command = "{open_cmd}"
+
+[[handlers]]
+pattern = "\\.pdf$"
+command = "{open_cmd}"
+
+# Add more handlers below:
 #
 # [[handlers]]
 # pattern = "\\.(doc|docx|odt|xls|xlsx|ppt|pptx)$"
-# command = "libreoffice {}"
+# command = "libreoffice {{}}"
 
 # Saved SCP/SFTP connections
 # Connections are saved automatically when you use the "Save" button in the
@@ -907,7 +949,8 @@ command = "xviewer {}"
 # name = "Make executable"
 # command = "chmod +x %f"
 # hotkey = "x"
-"##;
+"##, open_cmd = open_cmd)
+}
 
 impl Config {
     /// Load configuration from file, creating default if it doesn't exist
@@ -927,7 +970,7 @@ impl Config {
 
         // Create default config if it doesn't exist
         if !config_path.exists()
-            && let Err(e) = fs::write(&config_path, DEFAULT_CONFIG) {
+            && let Err(e) = fs::write(&config_path, &default_config()) {
                 eprintln!("Warning: Could not create config file: {}", e);
                 return Config::default();
             }
@@ -987,6 +1030,7 @@ impl Config {
             general["edit_mode_always"] = value(self.general.edit_mode_always);
             general["run_executables"] = value(self.general.run_executables);
             general["autosave"] = value(self.general.autosave);
+            general["view_plugin_first"] = value(self.general.view_plugin_first);
 
             // Update last paths (these are optional)
             if let Some(ref path) = self.general.last_left_path {
@@ -1077,6 +1121,19 @@ impl Config {
             doc.insert("plugin_connections", toml_edit::Item::ArrayOfTables(aot));
         }
 
+        // Update [[handlers]] array
+        doc.remove("handlers");
+        if !self.handlers.is_empty() {
+            let mut aot = toml_edit::ArrayOfTables::new();
+            for handler in &self.handlers {
+                let mut tbl = toml_edit::Table::new();
+                tbl.insert("pattern", value(&handler.pattern));
+                tbl.insert("command", value(&handler.command));
+                aot.push(tbl);
+            }
+            doc.insert("handlers", toml_edit::Item::ArrayOfTables(aot));
+        }
+
         // Update [[favorites]] array
         doc.remove("favorites");
         if !self.favorites.is_empty() {
@@ -1118,7 +1175,7 @@ impl Config {
             fs::create_dir_all(config_dir)?;
         }
 
-        fs::write(&config_path, DEFAULT_CONFIG)?;
+        fs::write(&config_path, &default_config())?;
 
         Ok(())
     }

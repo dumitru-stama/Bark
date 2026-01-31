@@ -28,8 +28,9 @@ pub enum SimpleConfirmAction {
 /// Content type for the file viewer
 #[derive(Clone, Debug)]
 pub enum ViewContent {
-    /// Text content (UTF-8)
-    Text(String),
+    /// Text content (UTF-8) with precomputed line byte offsets
+    /// (Vec contains byte offset of each line start; length = line count)
+    Text(String, Vec<usize>),
     /// Binary content (for hex dump)
     Binary(Vec<u8>),
     /// Memory-mapped local file (efficient for large files)
@@ -47,11 +48,14 @@ pub enum ViewContent {
 impl ViewContent {
     pub fn byte_offset_to_line(&self, offset: usize, binary_mode: BinaryViewMode, term_width: usize) -> usize {
         match self {
-            ViewContent::Text(text) => {
+            ViewContent::Text(_text, line_offsets) => {
                 match binary_mode {
                     BinaryViewMode::Cp437 => {
-                        // Count newlines up to offset
-                        text.as_bytes().iter().take(offset).filter(|&&b| b == b'\n').count()
+                        // Binary search on precomputed offsets
+                        match line_offsets.binary_search(&offset) {
+                            Ok(i) => i,
+                            Err(i) => i.saturating_sub(1),
+                        }
                     }
                     BinaryViewMode::Hex => {
                         let bytes_per_line = calculate_hex_bytes_per_line(term_width);
@@ -132,6 +136,8 @@ pub enum Mode {
         lines: Vec<String>,
         /// Total number of lines
         total_lines: usize,
+        /// Transient status message (e.g. "Saved to …"), cleared on next key
+        status_message: Option<String>,
     },
     /// Plugin selection menu in viewer (F2)
     ViewerPluginMenu {

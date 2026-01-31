@@ -1,0 +1,15 @@
+[package]
+name = "bark-image-viewer"
+version = "0.1.0"
+edition = "2024"
+description = "Image file viewer plugin for Bark file manager"
+license = "MIT"
+
+[[bin]]
+name = "bark-image-viewer"
+path = "src/main.rs"
+
+[dependencies]
+bark-plugin-api = { path = "../../plugin-api" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "ico", "tiff", "webp", "avif", "tga", "dds", "hdr", "exr", "pnm", "qoi", "ff"] }
+kamadak-exif = "0.6"

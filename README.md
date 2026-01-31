@@ -13,7 +13,7 @@ A modern Norton Commander / Midnight Commander clone written in Rust with a focu
 - **Remote filesystem support** via SCP/SFTP and WebDAV/WebDAVS
 - **Archive browsing** - enter ZIP, TAR, TAR.7Z, 7z, RAR, and compressed archives as folders
 - **Integrated shell** with command history, output capture, and ANSI color support
-- **Built-in file viewer** with text and hex modes
+- **Built-in file viewer** with text and hex modes, plus ELF, PE binary, image, and PDF metadata inspectors
 - **User Menu (F2)** for custom commands with hotkeys
 - **Git integration** showing branch and status in the status bar
 - **Customizable themes** with built-in dark, classic, and light presets
@@ -58,7 +58,7 @@ make setup-deps
 | `Up/Down` or `j/k` | Move cursor |
 | `Left/Right` or `h/l` | Move between columns / Page up/down |
 | `Ctrl+B` / `Ctrl+F` | Page up / Page down (vim-style) |
-| `Enter` | Enter directory / Enter archive / Run executable |
+| `Enter` | Enter directory / Enter archive / Open with handler / Run executable |
 | `Backspace` | Go to parent directory |
 | `Tab` | Switch active panel |
 | `Insert` | Select/deselect file |
@@ -214,6 +214,7 @@ sort, sort_field               Sort field (name, ext, size, time)
 sort_both, sort_field_both     Sort field (both panels)
 remember_path, remember        Remember panel paths across sessions
 theme                          Switch color theme
+view_plugin_first              Check viewer plugins before built-in viewer (F3)
 ```
 
 ### Example Configuration
@@ -227,6 +228,7 @@ edit_mode_always = true  # false for VIM/Helix mode; Enter : to input commands
 run_executables = true
 autosave = false  # Auto-save config on exit
 shell = ""  # Override shell (e.g., "pwsh", "cmd.exe", "/bin/zsh"). Empty = auto-detect
+view_plugin_first = false  # true = F3 checks viewer plugins first; false = built-in viewer first
 
 [display]
 view_mode = "brief"
@@ -279,13 +281,23 @@ command = "strip !.!"
 hotkey = "s"
 
 # File handlers (open files with external apps)
+# Default handlers use the OS opener: setsid xdg-open (Linux), open (macOS), explorer (Windows)
+# setsid detaches the launched app so it survives the script session teardown
 [[handlers]]
-pattern = "\\.(jpg|jpeg|png|gif)$"
-command = "xviewer {}"
+pattern = "\\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff|tif|avif)$"
+command = "setsid xdg-open {}"
 
 [[handlers]]
-pattern = "\\.(mp4|mkv|avi)$"
-command = "vlc {}"
+pattern = "\\.(mp4|mkv|avi|mov|webm|flv|wmv|m4v)$"
+command = "setsid xdg-open {}"
+
+[[handlers]]
+pattern = "\\.(mp3|flac|ogg|wav|aac|wma|m4a|opus)$"
+command = "setsid xdg-open {}"
+
+[[handlers]]
+pattern = "\\.pdf$"
+command = "setsid xdg-open {}"
 ```
 
 ### User Menu Placeholders
@@ -349,6 +361,9 @@ Plugins can be written in **any language** -- Rust, Python, Go, C, shell scripts
 | `bark-webdav` | Provider | WebDAV/WebDAVS file access |
 | `bark-archive` | Provider | Browse ZIP, TAR, 7z, RAR, xz, gz, bz2 archives |
 | `bark-elf-viewer` | Viewer | ELF binary header inspector |
+| `bark-pe-viewer` | Viewer | PE binary header inspector (exe/dll/sys/ocx/scr) with Authenticode signature verification |
+| `bark-image-viewer` | Viewer | Image metadata inspector (JPEG, PNG, GIF, BMP, WebP, TIFF, ICO, AVIF, TGA, DDS, HDR, EXR, QOI, PNM, Farbfeld) with EXIF/GPS data |
+| `bark-pdf-viewer` | Viewer | PDF document inspector (metadata, page details, fonts, structure, text preview) |
 | `system_status.py` | Status | System memory and CPU load (Python) |
 
 ### Installing Plugins
@@ -379,8 +394,9 @@ The built-in viewer (F3) supports:
 Local files are viewed using memory-mapped I/O for efficiency:
 - Only accessed pages are loaded into RAM (OS handles page-level buffering)
 - Can view files larger than available RAM
-- Fast scrolling with precomputed line offsets
+- O(1) scrolling via precomputed line byte offsets (both text and mmap modes)
 - Remote files (SCP/WebDAV) are fully loaded for viewing
+- Plugin viewer output can be saved to `<filename>.bark_plugin.txt` with Ctrl+S
 
 | Key | Action |
 |-----|--------|
@@ -391,6 +407,7 @@ Local files are viewed using memory-mapped I/O for efficiency:
 | `/` | Search |
 | `n/N` | Next/previous match |
 | `F2` | Select viewer plugin |
+| `Ctrl+S` | Save plugin viewer output to file (configurable) |
 | `Esc`, `q` | Exit viewer |
 
 ## Remote Connections

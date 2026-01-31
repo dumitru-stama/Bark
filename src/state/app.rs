@@ -224,14 +224,17 @@ impl App {
     }
 
     /// Drain pending messages from the persistent shell's reader thread.
-    pub fn poll_shell(&mut self) {
+    /// Drains pending shell messages. Returns true if any output was received.
+    pub fn poll_shell(&mut self) -> bool {
         let shell_alive;
+        let mut had_output = false;
         {
-            let Some(shell) = &mut self.shell else { return };
+            let Some(shell) = &mut self.shell else { return false };
             shell_alive = shell.is_alive();
 
             // Drain all available messages (non-blocking).
             while let Ok(msg) = shell.receiver.try_recv() {
+                had_output = true;
                 match msg {
                     ShellMessage::OutputLine(line)
                     | ShellMessage::InputTracked(line) => {
@@ -248,6 +251,7 @@ impl App {
         if !shell_alive {
             self.shell = None;
         }
+        had_output
     }
 
     /// Save current state to config (call before exit)
@@ -657,9 +661,20 @@ impl App {
                 // Loading applies #[serde(default)] for missing fields
                 self.config = Config::load();
 
-                // If handlers list is empty, populate with defaults
-                if self.config.handlers.is_empty() {
-                    self.config.handlers = crate::config::default_handlers();
+                // Merge default handlers: add missing patterns, and update
+                // commands that match a previous default (e.g. "xdg-open {}"
+                // -> "setsid xdg-open {}") without touching user-customized ones.
+                let old_defaults = ["xdg-open {}", "open {}", "explorer {}", "xviewer {}"];
+                let defaults = crate::config::default_handlers();
+                for dh in &defaults {
+                    if let Some(existing) = self.config.handlers.iter_mut().find(|h| h.pattern == dh.pattern) {
+                        // Update command only if it's a known old default
+                        if old_defaults.contains(&existing.command.as_str()) {
+                            existing.command = dh.command.clone();
+                        }
+                    } else {
+                        self.config.handlers.push(dh.clone());
+                    }
                 }
 
                 self.apply_config();
@@ -1063,6 +1078,17 @@ impl App {
                 };
                 self.config.general.remember_path = new_val;
                 format!("remember_path = {}", new_val)
+            }
+
+            "view_plugin_first" | "plugin_first" => {
+                let new_val = match value {
+                    Some("true") | Some("1") | Some("on") | Some("yes") => true,
+                    Some("false") | Some("0") | Some("off") | Some("no") => false,
+                    None => !self.config.general.view_plugin_first, // Toggle
+                    _ => return format!("Invalid value for {}: use true/false", option),
+                };
+                self.config.general.view_plugin_first = new_val;
+                format!("view_plugin_first = {}", new_val)
             }
 
             _ => format!("Unknown option: {}. Type 'help' for available options.", option),
@@ -2897,7 +2923,7 @@ impl App {
         // Handle empty files specially (mmap doesn't work on empty files)
         if metadata.len() == 0 {
             self.mode = Mode::Viewing {
-                content: ViewContent::Text(String::new()),
+                content: ViewContent::Text(String::new(), vec![0]),
                 scroll: 0,
                 path: path.to_path_buf(),
                 binary_mode: BinaryViewMode::Cp437,
@@ -2958,8 +2984,9 @@ impl App {
                 // Try to interpret as UTF-8 text first
                 match String::from_utf8(bytes.clone()) {
                     Ok(text) => {
+                        let line_offsets = compute_line_offsets(text.as_bytes());
                         self.mode = Mode::Viewing {
-                            content: ViewContent::Text(text),
+                            content: ViewContent::Text(text, line_offsets),
                             scroll: 0,
                             path: path.to_path_buf(),
                             binary_mode: BinaryViewMode::Cp437,  // Default to text view
@@ -3015,21 +3042,25 @@ impl App {
     pub fn view_file_with_plugins(&mut self, path: &std::path::Path) {
         // Check if any plugin can handle this file
         if let Some(plugin) = self.plugins.find_viewer(path) {
-            // Try to render with the plugin
+            // Request ALL lines from the plugin up front so scrolling is
+            // purely local (no per-scroll process spawns).  We pass a very
+            // large height so the plugin returns everything.
             let context = ViewerContext {
                 path: path.to_path_buf(),
                 width: self.ui.terminal_width as usize,
-                height: self.ui.viewer_height,
+                height: 1_000_000,
                 scroll: 0,
             };
 
             if let Some(result) = plugin.render(&context) {
+                let total = result.total_lines;
                 self.mode = Mode::ViewingPlugin {
                     plugin_name: plugin.info().name.clone(),
                     path: path.to_path_buf(),
                     scroll: 0,
                     lines: result.lines,
-                    total_lines: result.total_lines,
+                    total_lines: total,
+                    status_message: None,
                 };
                 return;
             }
@@ -3039,30 +3070,34 @@ impl App {
         self.view_file(path);
     }
 
-    /// Re-render plugin viewer content (for scrolling or resizing)
+    /// Re-render plugin viewer content (full reload from plugin).
+    /// Only needed for resize or plugin switch — not for scrolling.
+    #[allow(dead_code)]
     pub fn refresh_plugin_viewer(&mut self) {
         if let Mode::ViewingPlugin { plugin_name, path, scroll, .. } = &self.mode {
             let plugin_name = plugin_name.clone();
             let path = path.clone();
             let scroll = *scroll;
 
-            // Find the plugin again and re-render
+            // Find the plugin again and re-render (all lines)
             if let Some(plugin) = self.plugins.find_viewer(&path)
                 && plugin.info().name == plugin_name {
                     let context = ViewerContext {
                         path: path.clone(),
                         width: self.ui.terminal_width as usize,
-                        height: self.ui.viewer_height,
-                        scroll,
+                        height: 1_000_000,
+                        scroll: 0,
                     };
 
                     if let Some(result) = plugin.render(&context) {
+                        let total = result.total_lines;
                         self.mode = Mode::ViewingPlugin {
                             plugin_name,
                             path,
                             scroll,
                             lines: result.lines,
-                            total_lines: result.total_lines,
+                            total_lines: total,
+                            status_message: None,
                         };
                     }
                 }
@@ -3095,29 +3130,67 @@ impl App {
         self.plugins.list_viewer_plugins(path)
     }
 
-    /// Show the viewer plugin menu
-    pub fn show_viewer_plugin_menu(&mut self) {
-        // Only works in Viewing mode
-        let Mode::Viewing { content, scroll, path, binary_mode, .. } = &self.mode else {
+    /// Switch from plugin viewer to built-in viewer (Tab in plugin view)
+    pub fn switch_plugin_to_builtin_viewer(&mut self) {
+        let Mode::ViewingPlugin { path, .. } = &self.mode else {
+            return;
+        };
+        let path = path.clone();
+        self.view_file(&path);
+    }
+
+    /// Save plugin viewer output to a .bark_plugin.txt file next to the original.
+    pub fn save_plugin_viewer_output(&mut self) {
+        let Mode::ViewingPlugin { path, lines, status_message, .. } = &mut self.mode else {
             return;
         };
 
-        let path = path.clone();
-        let content = content.clone();
-        let binary_mode = *binary_mode;
-        let original_scroll = *scroll;
+        let mut save_path = path.as_os_str().to_os_string();
+        save_path.push(".bark_plugin.txt");
+        let save_path = std::path::PathBuf::from(save_path);
 
-        // Get available plugins
-        let plugins = self.get_viewer_plugins_for_file(&path);
+        match std::fs::write(&save_path, lines.join("\n")) {
+            Ok(_) => {
+                *status_message = Some(format!(
+                    "Saved to {}",
+                    save_path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+            Err(e) => {
+                *status_message = Some(format!("Save failed: {}", e));
+            }
+        }
+    }
 
-        self.mode = Mode::ViewerPluginMenu {
-            path,
-            content,
-            binary_mode,
-            original_scroll,
-            plugins,
-            selected: 0, // Start with "Built-in viewer" selected
-        };
+    /// Show the viewer plugin menu (works from both Viewing and ViewingPlugin modes)
+    pub fn show_viewer_plugin_menu(&mut self) {
+        match &self.mode {
+            Mode::Viewing { content, scroll, path, binary_mode, .. } => {
+                let path = path.clone();
+                let content = content.clone();
+                let binary_mode = *binary_mode;
+                let original_scroll = *scroll;
+
+                let plugins = self.get_viewer_plugins_for_file(&path);
+
+                self.mode = Mode::ViewerPluginMenu {
+                    path,
+                    content,
+                    binary_mode,
+                    original_scroll,
+                    plugins,
+                    selected: 0,
+                };
+            }
+            Mode::ViewingPlugin { path, .. } => {
+                // Load file content for built-in viewer fallback, then show menu
+                let path = path.clone();
+                self.view_file(&path);
+                // Now we're in Mode::Viewing — show the plugin menu from there
+                self.show_viewer_plugin_menu();
+            }
+            _ => {}
+        }
     }
 
     /// Select a plugin from the viewer menu
@@ -3144,11 +3217,11 @@ impl App {
             };
         } else if let Some((plugin_name, can_handle)) = plugins.get(index - 1) {
             if *can_handle {
-                // Use this plugin
+                // Request ALL lines up front so scrolling is purely local.
                 let context = ViewerContext {
                     path: path.clone(),
                     width: self.ui.terminal_width as usize,
-                    height: self.ui.viewer_height,
+                    height: 1_000_000,
                     scroll: 0,
                 };
 
@@ -3160,6 +3233,7 @@ impl App {
                             scroll: 0,
                             lines: result.lines,
                             total_lines: result.total_lines,
+                            status_message: None,
                         };
                         return;
                     }
@@ -3232,7 +3306,7 @@ impl App {
 
         // Get the bytes to search in
         let bytes: &[u8] = match &content {
-            ViewContent::Text(text) => text.as_bytes(),
+            ViewContent::Text(text, _) => text.as_bytes(),
             ViewContent::Binary(data) => data,
             ViewContent::MappedFile { mmap, .. } => mmap,
         };

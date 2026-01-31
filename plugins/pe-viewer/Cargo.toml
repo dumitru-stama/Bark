@@ -1,0 +1,14 @@
+[package]
+name = "bark-pe-viewer"
+version = "0.1.0"
+edition = "2024"
+description = "PE (Portable Executable) file viewer plugin for Bark file manager"
+license = "MIT"
+
+[[bin]]
+name = "bark-pe-viewer"
+path = "src/main.rs"
+
+[dependencies]
+bark-plugin-api = { path = "../../plugin-api" }
+pe-sign = "0.1.10"

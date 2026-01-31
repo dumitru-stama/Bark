@@ -678,13 +678,13 @@ fn extract_json_string_array(json: &str, key: &str) -> Option<Vec<String>> {
 
     let mut depth = 0;
     let mut end = 0;
-    for (i, c) in rest.chars().enumerate() {
+    for (i, c) in rest.char_indices() {
         match c {
             '[' => depth += 1,
             ']' => {
                 depth -= 1;
                 if depth == 0 {
-                    end = i + 1;
+                    end = i + c.len_utf8();
                     break;
                 }
             }
@@ -696,7 +696,7 @@ fn extract_json_string_array(json: &str, key: &str) -> Option<Vec<String>> {
         return None;
     }
 
-    let array_str = &rest[1..end - 1];
+    let array_str = &rest['['.len_utf8()..end - ']'.len_utf8()];
     let mut result = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
@@ -738,13 +738,13 @@ fn extract_json_array(json: &str, key: &str) -> Option<Vec<String>> {
 
     let mut depth = 0;
     let mut end = 0;
-    for (i, c) in rest.chars().enumerate() {
+    for (i, c) in rest.char_indices() {
         match c {
             '[' | '{' => depth += 1,
             ']' | '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    end = i + 1;
+                    end = i + c.len_utf8();
                     break;
                 }
             }
@@ -757,7 +757,7 @@ fn extract_json_array(json: &str, key: &str) -> Option<Vec<String>> {
     }
 
     // Parse array of objects
-    let array_content = &rest[1..end - 1];
+    let array_content = &rest['['.len_utf8()..end - ']'.len_utf8()];
     let mut objects = Vec::new();
     let mut current = String::new();
     let mut depth = 0;

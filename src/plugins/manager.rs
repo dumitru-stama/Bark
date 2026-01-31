@@ -149,13 +149,17 @@ impl PluginManager {
         self.status_plugins.len() + self.viewer_plugins.len() + self.provider_plugins.len()
     }
 
-    /// List all viewer plugins and whether they can handle the given file
+    /// List viewer plugins that can handle the given file
     pub fn list_viewer_plugins(&self, path: &Path) -> Vec<(String, bool)> {
         self.viewer_plugins
             .iter()
-            .map(|p| {
+            .filter_map(|p| {
                 let result = p.can_handle(path);
-                (p.info().name.clone(), result.can_handle)
+                if result.can_handle {
+                    Some((p.info().name.clone(), true))
+                } else {
+                    None
+                }
             })
             .collect()
     }

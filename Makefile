@@ -97,6 +97,9 @@ install-plugins: release
 	cp $(TARGET)/release/bark-webdav $(PLUGIN_DIR)/
 	cp $(TARGET)/release/bark-archive $(PLUGIN_DIR)/
 	cp $(TARGET)/release/bark-elf-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/release/bark-pe-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/release/bark-image-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/release/bark-pdf-viewer $(PLUGIN_DIR)/
 	cp plugins/scripts/*.py $(PLUGIN_DIR)/ 2>/dev/null || true
 	cp plugins/scripts/*.sh $(PLUGIN_DIR)/ 2>/dev/null || true
 	chmod +x $(PLUGIN_DIR)/* 2>/dev/null || true
@@ -109,6 +112,9 @@ install-plugins-debug: debug
 	cp $(TARGET)/debug/bark-webdav $(PLUGIN_DIR)/
 	cp $(TARGET)/debug/bark-archive $(PLUGIN_DIR)/
 	cp $(TARGET)/debug/bark-elf-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/debug/bark-pe-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/debug/bark-image-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/debug/bark-pdf-viewer $(PLUGIN_DIR)/
 	cp plugins/scripts/*.py $(PLUGIN_DIR)/ 2>/dev/null || true
 	chmod +x $(PLUGIN_DIR)/* 2>/dev/null || true
 	@echo "Debug plugins installed to $(PLUGIN_DIR)"
@@ -135,3 +141,6 @@ help:
 	@echo "  $(TARGET)/release/bark-webdav    WebDAV plugin"
 	@echo "  $(TARGET)/release/bark-archive   Archive plugin"
 	@echo "  $(TARGET)/release/bark-elf-viewer ELF viewer plugin"
+	@echo "  $(TARGET)/release/bark-pe-viewer  PE viewer plugin"
+	@echo "  $(TARGET)/release/bark-image-viewer Image viewer plugin"
+	@echo "  $(TARGET)/release/bark-pdf-viewer  PDF viewer plugin"

@@ -38,21 +38,19 @@ impl<'a> FileViewer<'a> {
         self
     }
 
-    /// Calculate byte offset for a given text line number
+    /// Calculate byte offset for a given text line number (O(1) via precomputed offsets)
     fn byte_offset_for_text_line(&self, bytes: &[u8], line_num: usize) -> usize {
-        let mut offset = 0;
-        let mut current_line = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if current_line >= line_num {
-                return offset;
+        let offsets: Option<&[usize]> = match self.content {
+            ViewContent::Text(_, line_offsets) => Some(line_offsets),
+            ViewContent::MappedFile { line_offsets, .. } => Some(line_offsets),
+            _ => None,
+        };
+        if let Some(offsets) = offsets {
+            if line_num < offsets.len() {
+                offsets[line_num]
+            } else {
+                bytes.len()
             }
-            if b == b'\n' {
-                current_line += 1;
-                offset = i + 1;
-            }
-        }
-        if current_line >= line_num {
-            offset
         } else {
             bytes.len()
         }
@@ -81,9 +79,9 @@ impl<'a> FileViewer<'a> {
     /// Calculate line count for the content
     pub fn line_count(content: &ViewContent, term_width: usize, binary_mode: BinaryViewMode) -> usize {
         match content {
-            ViewContent::Text(text) => {
+            ViewContent::Text(text, line_offsets) => {
                 match binary_mode {
-                    BinaryViewMode::Cp437 => text.lines().count(),  // Normal text view
+                    BinaryViewMode::Cp437 => line_offsets.len(),  // Precomputed
                     BinaryViewMode::Hex => {
                         // Hex view of text content
                         let bytes = text.as_bytes();
@@ -166,7 +164,7 @@ impl Widget for FileViewer<'_> {
         let is_binary = match self.content {
             ViewContent::Binary(_) => true,
             ViewContent::MappedFile { is_text, .. } => !is_text,
-            ViewContent::Text(_) => false,
+            ViewContent::Text(..) => false,
         };
         let header = match (is_binary, self.binary_mode) {
             (true, BinaryViewMode::Hex) => format!(" {} [HEX] ", path_str),
@@ -198,18 +196,30 @@ impl Widget for FileViewer<'_> {
 
         // Get lines to render based on content type
         let (lines, total_lines, show_line_numbers) = match self.content {
-            ViewContent::Text(text) => {
+            ViewContent::Text(text, line_offsets) => {
                 match self.binary_mode {
                     BinaryViewMode::Cp437 => {
-                        // Normal text view
-                        let all_lines: Vec<&str> = text.lines().collect();
-                        let total = all_lines.len();
-                        let visible: Vec<String> = all_lines
-                            .into_iter()
-                            .skip(self.scroll)
-                            .take(content_height)
-                            .map(|s| s.to_string())
-                            .collect();
+                        // Normal text view — O(1) access via precomputed offsets
+                        let total = line_offsets.len();
+                        let bytes = text.as_bytes();
+                        let mut visible = Vec::with_capacity(content_height);
+                        for i in self.scroll..total.min(self.scroll + content_height) {
+                            let start = line_offsets[i];
+                            let end = if i + 1 < total {
+                                line_offsets[i + 1]
+                            } else {
+                                bytes.len()
+                            };
+                            // Trim trailing \n or \r\n
+                            let mut line_end = end;
+                            if line_end > start && bytes[line_end - 1] == b'\n' {
+                                line_end -= 1;
+                            }
+                            if line_end > start && bytes[line_end - 1] == b'\r' {
+                                line_end -= 1;
+                            }
+                            visible.push(String::from_utf8_lossy(&bytes[start..line_end]).into_owned());
+                        }
                         (visible, total, true)
                     }
                     BinaryViewMode::Hex => {
@@ -348,7 +358,7 @@ impl Widget for FileViewer<'_> {
 
         // Get the raw bytes for highlighting calculation
         let bytes: &[u8] = match self.content {
-            ViewContent::Text(text) => text.as_bytes(),
+            ViewContent::Text(text, _) => text.as_bytes(),
             ViewContent::Binary(data) => data,
             ViewContent::MappedFile { mmap, .. } => mmap,
         };

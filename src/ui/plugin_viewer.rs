@@ -5,7 +5,7 @@ use std::path::Path;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     widgets::Widget,
 };
 
@@ -18,6 +18,7 @@ pub struct PluginViewer<'a> {
     lines: &'a [String],
     scroll: usize,
     total_lines: usize,
+    status_message: Option<&'a str>,
     theme: &'a Theme,
 }
 
@@ -28,6 +29,7 @@ impl<'a> PluginViewer<'a> {
         lines: &'a [String],
         scroll: usize,
         total_lines: usize,
+        status_message: Option<&'a str>,
         theme: &'a Theme,
     ) -> Self {
         Self {
@@ -36,6 +38,7 @@ impl<'a> PluginViewer<'a> {
             lines,
             scroll,
             total_lines,
+            status_message,
             theme,
         }
     }
@@ -81,8 +84,8 @@ impl Widget for PluginViewer<'_> {
             }
         }
 
-        // Render visible lines
-        for (i, line) in self.lines.iter().enumerate() {
+        // Render visible lines (slice from scroll offset)
+        for (i, line) in self.lines.iter().skip(self.scroll).enumerate() {
             if i >= content_height {
                 break;
             }
@@ -97,7 +100,7 @@ impl Widget for PluginViewer<'_> {
             buf[(x, footer_y)].set_char(' ').set_style(footer_style);
         }
 
-        // Footer content: position info and help
+        // Footer content: position info and help (or status message)
         let visible_end = (self.scroll + content_height).min(self.total_lines);
         let percent = if self.total_lines > 0 {
             ((visible_end as f64 / self.total_lines as f64) * 100.0) as usize
@@ -111,14 +114,25 @@ impl Widget for PluginViewer<'_> {
             self.total_lines,
             percent
         );
-        let help_text = " ESC/q/F3:Exit  Up/Down:Scroll ";
 
         buf.set_string(area.x, footer_y, &position_info, footer_style);
 
-        // Right-align help text
-        let help_x = (area.x + area.width).saturating_sub(help_text.len() as u16);
-        if help_x > area.x + position_info.len() as u16 {
-            buf.set_string(help_x, footer_y, help_text, footer_style);
+        // Right side: show status message if present, otherwise show help
+        let right_text = if let Some(msg) = self.status_message {
+            format!(" {} ", msg)
+        } else {
+            " Ctrl+S:Save  ESC/q/F3:Exit  Up/Down:Scroll ".to_string()
+        };
+
+        let right_style = if self.status_message.is_some() {
+            footer_style.add_modifier(Modifier::BOLD)
+        } else {
+            footer_style
+        };
+
+        let right_x = (area.x + area.width).saturating_sub(right_text.len() as u16);
+        if right_x > area.x + position_info.len() as u16 {
+            buf.set_string(right_x, footer_y, &right_text, right_style);
         }
     }
 }

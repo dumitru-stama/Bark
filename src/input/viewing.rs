@@ -43,6 +43,7 @@ pub fn handle_viewing_mode(app: &mut App, key: KeyEvent, visible_height: usize) 
         KeyCode::Esc | KeyCode::F(3) | KeyCode::Char('q') | KeyCode::F(10) => {
             app.ui.viewer_pending_g = false;
             app.mode = Mode::Normal;
+            app.refresh_panels();
         }
 
         // Show plugin menu (F2)
@@ -148,66 +149,112 @@ pub fn handle_viewing_mode(app: &mut App, key: KeyEvent, visible_height: usize) 
 }
 
 pub fn handle_plugin_viewing_mode(app: &mut App, key: KeyEvent, visible_height: usize) {
-    let Mode::ViewingPlugin { scroll, total_lines, .. } = &mut app.mode else {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    // Check configurable keybindings before borrowing app.mode mutably.
+    if app.key_matches("viewer_save", &key) {
+        app.save_plugin_viewer_output();
+        return;
+    }
+
+    let Mode::ViewingPlugin { scroll, total_lines, status_message, .. } = &mut app.mode else {
         return;
     };
 
+    // Clear any status message on the next keypress.
+    *status_message = None;
+
     let max_scroll = total_lines.saturating_sub(visible_height);
+    let half_page = visible_height / 2;
+
+    // All lines are loaded up front, so scrolling just changes the offset —
+    // no plugin round-trip needed.  The widget slices from `scroll`.
+
+    // Handle 'g' prefix commands (gg, ge)
+    if app.ui.viewer_pending_g {
+        app.ui.viewer_pending_g = false;
+        match key.code {
+            // gg - go to top (helix/vim)
+            KeyCode::Char('g') => {
+                *scroll = 0;
+            }
+            // ge - go to end (helix)
+            KeyCode::Char('e') => {
+                *scroll = max_scroll;
+            }
+            _ => {}
+        }
+        return;
+    }
 
     match key.code {
         // Exit viewer
         KeyCode::Esc | KeyCode::F(3) | KeyCode::Char('q') | KeyCode::F(10) => {
+            app.ui.viewer_pending_g = false;
             app.mode = Mode::Normal;
+            app.refresh_panels();
         }
 
-        // Scroll up
+        // 'g' prefix - start g-command
+        KeyCode::Char('g') => {
+            app.ui.viewer_pending_g = true;
+        }
+
+        // G - go to end (vim)
+        KeyCode::Char('G') => {
+            *scroll = max_scroll;
+        }
+
+        // Switch to built-in viewer
+        KeyCode::Tab => {
+            app.switch_plugin_to_builtin_viewer();
+        }
+
+        // Show plugin menu (F2)
+        KeyCode::F(2) => {
+            app.show_viewer_plugin_menu();
+        }
+
+        // Scroll up - k or Up arrow
         KeyCode::Up | KeyCode::Char('k') => {
-            if *scroll > 0 {
-                *scroll -= 1;
-                app.refresh_plugin_viewer();
-            }
+            *scroll = scroll.saturating_sub(1);
         }
 
-        // Scroll down
+        // Scroll down - j or Down arrow
         KeyCode::Down | KeyCode::Char('j') => {
             if *scroll < max_scroll {
                 *scroll += 1;
-                app.refresh_plugin_viewer();
             }
         }
 
-        // Page up
-        KeyCode::PageUp => {
-            let old_scroll = *scroll;
+        // Half page up - Ctrl+u (vim)
+        KeyCode::Char('u') if ctrl => {
+            *scroll = scroll.saturating_sub(half_page);
+        }
+
+        // Half page down - Ctrl+d (vim)
+        KeyCode::Char('d') if ctrl => {
+            *scroll = (*scroll + half_page).min(max_scroll);
+        }
+
+        // Page up - PageUp or Ctrl+b (vim)
+        KeyCode::PageUp | KeyCode::Char('b') if key.code == KeyCode::PageUp || ctrl => {
             *scroll = scroll.saturating_sub(visible_height);
-            if *scroll != old_scroll {
-                app.refresh_plugin_viewer();
-            }
         }
 
-        // Page down
-        KeyCode::PageDown => {
-            let old_scroll = *scroll;
+        // Page down - PageDown or Ctrl+f (vim)
+        KeyCode::PageDown | KeyCode::Char('f') if key.code == KeyCode::PageDown || ctrl => {
             *scroll = (*scroll + visible_height).min(max_scroll);
-            if *scroll != old_scroll {
-                app.refresh_plugin_viewer();
-            }
         }
 
         // Home - go to start
         KeyCode::Home => {
-            if *scroll != 0 {
-                *scroll = 0;
-                app.refresh_plugin_viewer();
-            }
+            *scroll = 0;
         }
 
         // End - go to end
         KeyCode::End => {
-            if *scroll != max_scroll {
-                *scroll = max_scroll;
-                app.refresh_plugin_viewer();
-            }
+            *scroll = max_scroll;
         }
 
         _ => {}
@@ -488,20 +535,32 @@ FILE VIEWER (F3)
 ================
   j, Down      Scroll down
   k, Up        Scroll up
-  g, Home      Go to start
-  G, End       Go to end
+  gg           Go to start (vim/helix)
+  ge           Go to end (helix)
+  G            Go to end (vim)
+  Home         Go to start
+  End          Go to end
+  Ctrl+U       Half page up
+  Ctrl+D       Half page down
+  Ctrl+B       Page up (vim)
+  Ctrl+F       Page down (vim)
   PageUp       Page up
   PageDown     Page down
-  TAB          Toggle HEX/TEXT mode
+  TAB          Toggle HEX/CP437 mode (built-in viewer)
+               Switch to built-in viewer (plugin viewer)
   F2           Select viewer plugin
+  /            Search text
+  n / N        Next / previous match
   q, Esc, F3   Exit viewer
 
 VIEWER PLUGINS
 ==============
   Press F2 in the viewer to select from available plugins.
-  Plugins in plugins/native/ (Rust/C .so/.dll) and
-  plugins/scripts/ (Python, Shell) can provide custom
-  viewers for specific file types (e.g., ELF headers).
+  All navigation keys (gg, ge, G, Ctrl+U/D/B/F, etc.)
+  work in both built-in and plugin viewers.
+  TAB in a plugin viewer switches to the built-in viewer.
+  F2 opens the plugin menu from either viewer.
+  Ctrl+S saves plugin viewer output to a .bark_plugin.txt file.
 
 OTHER
 =====
