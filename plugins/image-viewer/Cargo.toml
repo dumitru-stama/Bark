@@ -11,5 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 bark-plugin-api = { path = "../../plugin-api" }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "ico", "tiff", "webp", "avif", "tga", "dds", "hdr", "exr", "pnm", "qoi", "ff"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "ico", "tiff", "webp", "tga", "dds", "hdr", "exr", "pnm", "qoi", "ff"] }
 kamadak-exif = "0.6"
