@@ -10,7 +10,7 @@ use crate::providers::{PanelSource, ProviderType, ScpAuth, ScpConnectionInfo, ge
 use crate::ui::Theme;
 use crate::errors::AppError;
 use crate::utils::{glob_to_regex, parse_hex_string, wildcard_to_regex};
-use crate::fs::utils::{copy_path, move_path, delete_path};
+use crate::fs::utils::delete_path;
 use crate::ui::viewer_utils::compute_line_offsets;
 
 use super::mode::{Mode, FileOperation, SimpleConfirmAction, ViewContent, BinaryViewMode};
@@ -1366,9 +1366,6 @@ impl App {
             }
         }
 
-        let mut count = 0;
-        let mut errors = Vec::new();
-
         // Resolve relative destination paths against the active panel's directory
         let dest = if dest.is_relative() {
             let base = self.active_panel().path.clone();
@@ -1376,9 +1373,6 @@ impl App {
         } else {
             dest
         };
-
-        // Single file to a non-directory destination = rename (use dest as full path)
-        let is_rename = sources.len() == 1 && !dest.is_dir();
 
         // Check if source (active) panel is remote
         let src_is_remote = self.active_panel().is_remote();
@@ -1413,242 +1407,164 @@ impl App {
             return;
         }
 
+        // Handle delete operations synchronously (they're fast, just metadata ops)
+        if matches!(operation, FileOperation::Delete) {
+            let mut count = 0;
+            let mut errors = Vec::new();
+            for src_path in &sources {
+                let result = if src_is_remote {
+                    let path_str = src_path.to_string_lossy().to_string();
+                    let is_dir = self.active_panel().entries.iter()
+                        .find(|e| e.path == *src_path)
+                        .map(|e| e.is_dir)
+                        .unwrap_or(false);
+                    self.active_panel_mut().delete_path(&path_str, is_dir).map_err(|e| e.to_string())
+                } else {
+                    delete_path(src_path).map_err(|e: std::io::Error| e.to_string())
+                };
+                match result {
+                    Ok(()) => count += 1,
+                    Err(e) => errors.push(format!("{}: {}", src_path.display(), e)),
+                }
+            }
+            self.active_panel_mut().selected.clear();
+            self.left_panel.refresh();
+            self.right_panel.refresh();
+            self.refresh_git_status();
+            if !errors.is_empty() {
+                self.active_panel_mut().error = Some(format!(
+                    "Deleted {}, {} errors: {}",
+                    count, errors.len(), errors.first().unwrap_or(&String::new())
+                ));
+            } else {
+                self.add_shell_output(format!("Deleted {} file(s)", count));
+            }
+            return;
+        }
+
+        // For remote copy/move, check size guard then dispatch to background thread
+        self.execute_remote_with_size_guard(operation, sources, dest, false);
+    }
+
+    /// Dispatch a remote copy/move to a background thread.
+    /// Called from execute_file_operation (after size guard) or from LargeRemoteTransfer confirm.
+    fn dispatch_remote_file_operation(&mut self, operation: FileOperation, sources: Vec<PathBuf>, dest: PathBuf) {
+        use super::background::SourceMeta;
+
+        let src_is_remote = self.active_panel().is_remote();
         let dest_is_remote = match self.active_panel {
             Side::Left => self.right_panel.is_remote(),
             Side::Right => self.left_panel.is_remote(),
         };
 
-        for src_path in &sources {
-            let result: Result<(), String> = match &operation {
-                FileOperation::Delete => {
-                    if src_is_remote {
-                        // Delete on remote
-                        let path_str = src_path.to_string_lossy().to_string();
-                        // Check if it's a directory by looking at the entries
-                        let is_dir = self.active_panel().entries.iter()
-                            .find(|e| e.path == *src_path)
-                            .map(|e| e.is_dir)
-                            .unwrap_or(false);
-                        self.active_panel_mut().delete_path(&path_str, is_dir).map_err(|e| e.to_string())
-                    } else {
-                        // Delete local
-                        delete_path(src_path).map_err(|e: std::io::Error| e.to_string())
-                    }
+        // Pre-collect metadata from panel entries (or local fs for local sources)
+        let source_metas: Vec<SourceMeta> = sources.iter().map(|src_path| {
+            if src_is_remote {
+                // Get metadata from panel entries
+                let entry = self.active_panel().entries.iter().find(|e| e.path == *src_path);
+                SourceMeta {
+                    path: src_path.clone(),
+                    is_dir: entry.map(|e| e.is_dir).unwrap_or(false),
+                    modified: entry.and_then(|e| e.modified),
+                    permissions: entry.map(|e| e.permissions).unwrap_or(0),
+                    size: entry.map(|e| e.size).unwrap_or(0),
                 }
-                FileOperation::Copy => {
-                    let dest_file = if is_rename {
-                        dest.clone()
-                    } else {
-                        dest.join(src_path.file_name().unwrap_or_default())
-                    };
-
-                    match (src_is_remote, dest_is_remote) {
-                        (false, false) => {
-                            // Local to local
-                            copy_path(src_path, &dest_file).map_err(|e: std::io::Error| e.to_string())
-                        }
-                        (true, false) => {
-                            // Remote to local: download
-                            let path_str = src_path.to_string_lossy().to_string();
-                            // Grab metadata from the source entry before writing
-                            let (modified, permissions) = self.active_panel().entries.iter()
-                                .find(|e| e.path == *src_path)
-                                .map(|e| (e.modified, e.permissions))
-                                .unwrap_or((None, 0));
-                            match self.active_panel_mut().read_file(&path_str) {
-                                Ok(data) => {
-                                    match std::fs::write(&dest_file, data) {
-                                        Ok(()) => {
-                                            Self::apply_provider_attributes(&dest_file, modified, permissions);
-                                            Ok(())
-                                        }
-                                        Err(e) => Err(e.to_string()),
-                                    }
-                                }
-                                Err(e) => Err(e.to_string()),
-                            }
-                        }
-                        (false, true) => {
-                            // Local to remote: upload, then set attributes
-                            let meta = std::fs::metadata(src_path).ok();
-                            let modified = meta.as_ref().and_then(|m| m.modified().ok());
-                            #[cfg(unix)]
-                            let permissions = meta.as_ref().map(|m| {
-                                use std::os::unix::fs::PermissionsExt;
-                                m.permissions().mode()
-                            }).unwrap_or(0);
-                            #[cfg(not(unix))]
-                            let permissions = 0u32;
-
-                            match std::fs::read(src_path) {
-                                Ok(data) => {
-                                    let dest_str = dest_file.to_string_lossy().to_string();
-                                    let panel = match self.active_panel {
-                                        Side::Left => &mut self.right_panel,
-                                        Side::Right => &mut self.left_panel,
-                                    };
-                                    match panel.write_file(&dest_str, &data) {
-                                        Ok(()) => {
-                                            let _ = panel.set_attributes(&dest_str, modified, permissions);
-                                            Ok(())
-                                        }
-                                        Err(e) => Err(e.to_string()),
-                                    }
-                                }
-                                Err(e) => Err(e.to_string()),
-                            }
-                        }
-                        (true, true) => {
-                            // Remote to remote: download then upload, preserve attributes
-                            let path_str = src_path.to_string_lossy().to_string();
-                            let (modified, permissions) = self.active_panel().entries.iter()
-                                .find(|e| e.path == *src_path)
-                                .map(|e| (e.modified, e.permissions))
-                                .unwrap_or((None, 0));
-                            match self.active_panel_mut().read_file(&path_str) {
-                                Ok(data) => {
-                                    let dest_str = dest_file.to_string_lossy().to_string();
-                                    let panel = match self.active_panel {
-                                        Side::Left => &mut self.right_panel,
-                                        Side::Right => &mut self.left_panel,
-                                    };
-                                    match panel.write_file(&dest_str, &data) {
-                                        Ok(()) => {
-                                            let _ = panel.set_attributes(&dest_str, modified, permissions);
-                                            Ok(())
-                                        }
-                                        Err(e) => Err(e.to_string()),
-                                    }
-                                }
-                                Err(e) => Err(e.to_string()),
-                            }
-                        }
-                    }
-                }
-                FileOperation::Move => {
-                    let dest_file = if is_rename {
-                        dest.clone()
-                    } else {
-                        dest.join(src_path.file_name().unwrap_or_default())
-                    };
-
-                    match (src_is_remote, dest_is_remote) {
-                        (false, false) => {
-                            // Local to local
-                            move_path(src_path, &dest_file).map_err(|e: std::io::Error| e.to_string())
-                        }
-                        (true, false) => {
-                            // Remote to local: download then delete remote
-                            let path_str = src_path.to_string_lossy().to_string();
-                            let (modified, permissions) = self.active_panel().entries.iter()
-                                .find(|e| e.path == *src_path)
-                                .map(|e| (e.modified, e.permissions))
-                                .unwrap_or((None, 0));
-                            match self.active_panel_mut().read_file(&path_str) {
-                                Ok(data) => {
-                                    match std::fs::write(&dest_file, &data) {
-                                        Ok(()) => {
-                                            Self::apply_provider_attributes(&dest_file, modified, permissions);
-                                            self.active_panel_mut().delete_path(&path_str, false).map_err(|e| e.to_string())
-                                        }
-                                        Err(e) => Err(e.to_string()),
-                                    }
-                                }
-                                Err(e) => Err(e.to_string()),
-                            }
-                        }
-                        (false, true) => {
-                            // Local to remote: upload with attributes, then delete local
-                            let meta = std::fs::metadata(src_path).ok();
-                            let modified = meta.as_ref().and_then(|m| m.modified().ok());
-                            #[cfg(unix)]
-                            let permissions = meta.as_ref().map(|m| {
-                                use std::os::unix::fs::PermissionsExt;
-                                m.permissions().mode()
-                            }).unwrap_or(0);
-                            #[cfg(not(unix))]
-                            let permissions = 0u32;
-
-                            match std::fs::read(src_path) {
-                                Ok(data) => {
-                                    let dest_str = dest_file.to_string_lossy().to_string();
-                                    let panel = match self.active_panel {
-                                        Side::Left => &mut self.right_panel,
-                                        Side::Right => &mut self.left_panel,
-                                    };
-                                    match panel.write_file(&dest_str, &data) {
-                                        Ok(()) => {
-                                            let _ = panel.set_attributes(&dest_str, modified, permissions);
-                                            std::fs::remove_file(src_path).map_err(|e| e.to_string())
-                                        }
-                                        Err(e) => Err(e.to_string()),
-                                    }
-                                }
-                                Err(e) => Err(e.to_string()),
-                            }
-                        }
-                        (true, true) => {
-                            // Remote to remote: download/upload/delete, preserve attributes
-                            let path_str = src_path.to_string_lossy().to_string();
-                            let (modified, permissions) = self.active_panel().entries.iter()
-                                .find(|e| e.path == *src_path)
-                                .map(|e| (e.modified, e.permissions))
-                                .unwrap_or((None, 0));
-                            match self.active_panel_mut().read_file(&path_str) {
-                                Ok(data) => {
-                                    let dest_str = dest_file.to_string_lossy().to_string();
-                                    let panel = match self.active_panel {
-                                        Side::Left => &mut self.right_panel,
-                                        Side::Right => &mut self.left_panel,
-                                    };
-                                    match panel.write_file(&dest_str, &data) {
-                                        Ok(()) => {
-                                            let _ = panel.set_attributes(&dest_str, modified, permissions);
-                                            self.active_panel_mut().delete_path(&path_str, false).map_err(|e| e.to_string())
-                                        }
-                                        Err(e) => Err(e.to_string()),
-                                    }
-                                }
-                                Err(e) => Err(e.to_string()),
-                            }
-                        }
-                    }
-                }
-            };
-
-            if let Err(e) = result {
-                errors.push(format!("{}: {}", src_path.display(), e));
             } else {
-                count += 1;
+                // Local source: read metadata from filesystem
+                let meta = std::fs::metadata(src_path).ok();
+                let modified = meta.as_ref().and_then(|m| m.modified().ok());
+                #[cfg(unix)]
+                let permissions = meta.as_ref().map(|m| {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.permissions().mode()
+                }).unwrap_or(0);
+                #[cfg(not(unix))]
+                let permissions = 0u32;
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                SourceMeta { path: src_path.clone(), is_dir, modified, permissions, size }
             }
-        }
+        }).collect();
 
-        // Clear selection after operation
-        self.active_panel_mut().selected.clear();
-
-        // Refresh both panels and git status
-        self.left_panel.refresh();
-        self.right_panel.refresh();
-        self.refresh_git_status();
-
-        // Show result
-        let op_name = match operation {
-            FileOperation::Copy => "Copied",
-            FileOperation::Move => "Moved",
-            FileOperation::Delete => "Deleted",
+        // Take providers from panels as needed
+        let taken_src = if src_is_remote {
+            Some(self.active_panel_mut().take_provider())
+        } else {
+            None
+        };
+        let taken_dest = if dest_is_remote {
+            let panel = match self.active_panel {
+                Side::Left => &mut self.right_panel,
+                Side::Right => &mut self.left_panel,
+            };
+            Some(panel.take_provider())
+        } else {
+            None
         };
 
-        if !errors.is_empty() {
-            self.active_panel_mut().error = Some(format!(
-                "{} {}, {} errors: {}",
-                op_name,
-                count,
-                errors.len(),
-                errors.first().unwrap_or(&String::new())
-            ));
-        } else {
-            self.add_shell_output(format!("{} {} file(s)", op_name, count));
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.cancel_token = Some(cancel.clone());
+
+        let title = match &operation {
+            FileOperation::Copy => "Copying",
+            FileOperation::Move => "Moving",
+            FileOperation::Delete => unreachable!(),
+        }.to_string();
+
+        let task = super::background::BackgroundTask::remote_file_operation(
+            operation, source_metas, dest,
+            taken_src, taken_dest,
+            self.active_panel, cancel,
+        );
+        self.background_task = Some(task);
+        self.mode = Mode::FileOpProgress {
+            title,
+            bytes_done: 0,
+            bytes_total: 0,
+            current_file: String::new(),
+            files_done: 0,
+            files_total: 0,
+            frame: 0,
+        };
+    }
+
+    /// Execute a remote file operation, optionally checking the size guard first.
+    /// Called from execute_file_operation for remote copy/move.
+    /// If `bypass_size_guard` is true, skip the size check (used after user confirms large transfer).
+    pub fn execute_remote_with_size_guard(&mut self, operation: FileOperation, sources: Vec<PathBuf>, dest: PathBuf, bypass_size_guard: bool) {
+        if !bypass_size_guard {
+            let limit_mb = self.config.general.remote_transfer_limit_mb;
+            if limit_mb > 0 {
+                let total_bytes: u64 = sources.iter()
+                    .filter_map(|src| self.active_panel().entries.iter().find(|e| e.path == *src))
+                    .map(|e| e.size)
+                    .sum();
+                let limit_bytes = limit_mb * 1024 * 1024;
+                if total_bytes > limit_bytes {
+                    // Show confirmation dialog
+                    let total_mb = total_bytes / (1024 * 1024);
+                    let op_name = match &operation {
+                        FileOperation::Copy => "copy",
+                        FileOperation::Move => "move",
+                        FileOperation::Delete => "delete",
+                    };
+                    self.mode = Mode::SimpleConfirm {
+                        message: format!(
+                            "Transfer size is {} MB ({} files). Limit is {} MB. Proceed with {}?",
+                            total_mb, sources.len(), limit_mb, op_name,
+                        ),
+                        action: SimpleConfirmAction::LargeRemoteTransfer {
+                            operation,
+                            sources,
+                            dest,
+                        },
+                        focus: 0,
+                    };
+                    return;
+                }
+            }
         }
+        self.dispatch_remote_file_operation(operation, sources, dest);
     }
 
     /// Start a file operation with overwrite conflict checking.
@@ -2298,6 +2214,10 @@ impl App {
                 } else {
                     self.add_shell_output("Favorite removed".to_string());
                 }
+            }
+            SimpleConfirmAction::LargeRemoteTransfer { operation, sources, dest } => {
+                // User confirmed the large transfer — bypass size guard
+                self.dispatch_remote_file_operation(operation, sources, dest);
             }
         }
     }
@@ -3583,6 +3503,44 @@ impl App {
                     // Clear selection after operation
                     self.active_panel_mut().selected.clear();
                     // Refresh both panels and git status
+                    self.left_panel.refresh();
+                    self.right_panel.refresh();
+                    self.refresh_git_status();
+
+                    if !result.errors.is_empty() {
+                        self.active_panel_mut().error = Some(format!(
+                            "{} {}, {} errors: {}",
+                            result.op_name,
+                            result.count,
+                            result.errors.len(),
+                            result.errors.first().unwrap_or(&String::new())
+                        ));
+                    } else {
+                        self.add_shell_output(format!("{} {} file(s)", result.op_name, result.count));
+                    }
+                    self.mode = Mode::Normal;
+                }
+                TaskResult::RemoteFileOpCompleted { result, src_provider, dest_provider, active_side } => {
+                    self.cancel_token = None;
+
+                    // Restore providers to their panels
+                    if let Some(prov) = src_provider {
+                        let panel = match active_side {
+                            Side::Left => &mut self.left_panel,
+                            Side::Right => &mut self.right_panel,
+                        };
+                        panel.restore_provider(prov);
+                    }
+                    if let Some(prov) = dest_provider {
+                        let panel = match active_side {
+                            Side::Left => &mut self.right_panel,
+                            Side::Right => &mut self.left_panel,
+                        };
+                        panel.restore_provider(prov);
+                    }
+
+                    // Clear selection, refresh panels, show results
+                    self.active_panel_mut().selected.clear();
                     self.left_panel.refresh();
                     self.right_panel.refresh();
                     self.refresh_git_status();

@@ -1,1 +1,0 @@
-/home/ds/work/fpga_local_git/books-by-AI/nc-clone/plugins/native/example_status/target/release/libexample_status.so: /home/ds/work/fpga_local_git/books-by-AI/nc-clone/plugins/native/example_status/src/lib.rs

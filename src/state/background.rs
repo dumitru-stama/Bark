@@ -79,6 +79,25 @@ pub enum TaskResult {
     },
     /// File operation completed
     FileOpCompleted(FileOpResult),
+    /// Remote file operation completed (providers need to be restored to panels)
+    RemoteFileOpCompleted {
+        result: FileOpResult,
+        /// Provider(s) to return to panels
+        src_provider: Option<Box<dyn PanelProvider>>,
+        dest_provider: Option<Box<dyn PanelProvider>>,
+        /// Which panel was the active (source) side
+        active_side: Side,
+    },
+}
+
+/// Metadata for a source file (pre-collected from panel entries before provider is taken)
+#[allow(dead_code)]
+pub struct SourceMeta {
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub modified: Option<std::time::SystemTime>,
+    pub permissions: u32,
+    pub size: u64,
 }
 
 /// A background task with its communication channel
@@ -387,5 +406,182 @@ impl BackgroundTask {
             progress_rx: Some(progress_rx),
             _handle: handle,
         }
+    }
+
+    /// Spawn a background remote file operation (copy or move involving at least one remote provider).
+    ///
+    /// The caller must take providers out of the panels before calling this.
+    /// They will be returned via `TaskResult::RemoteFileOpCompleted`.
+    pub fn remote_file_operation(
+        operation: FileOperation,
+        source_metas: Vec<SourceMeta>,
+        dest: PathBuf,
+        mut src_provider: Option<Box<dyn PanelProvider>>,
+        mut dest_provider: Option<Box<dyn PanelProvider>>,
+        active_side: Side,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        let (tx, rx) = channel::<TaskResult>();
+        let (progress_tx, progress_rx) = channel::<FileOpProgress>();
+
+        let files_total = source_metas.len();
+        let bytes_total: u64 = source_metas.iter().map(|m| m.size).sum();
+        let is_rename = source_metas.len() == 1 && !dest.is_dir();
+        let src_is_remote = src_provider.is_some();
+        let dest_is_remote = dest_provider.is_some();
+
+        let handle = thread::spawn(move || {
+            let mut count = 0usize;
+            let mut errors: Vec<String> = Vec::new();
+            let bytes_done = Arc::new(AtomicU64::new(0));
+
+            for (i, meta) in source_metas.iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let file_name = meta.path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let dest_file = if is_rename {
+                    dest.clone()
+                } else {
+                    dest.join(&file_name)
+                };
+
+                // Send progress
+                let _ = progress_tx.send(FileOpProgress {
+                    bytes_done: bytes_done.load(Ordering::Relaxed),
+                    bytes_total,
+                    current_file: file_name.clone(),
+                    files_done: i,
+                    files_total,
+                });
+
+                let result: Result<(), String> = match &operation {
+                    FileOperation::Copy => {
+                        Self::remote_copy_one(
+                            &meta.path, &dest_file, meta.modified, meta.permissions,
+                            src_is_remote, dest_is_remote,
+                            &mut src_provider, &mut dest_provider,
+                        )
+                    }
+                    FileOperation::Move => {
+                        // Move = copy + delete source
+                        let copy_result = Self::remote_copy_one(
+                            &meta.path, &dest_file, meta.modified, meta.permissions,
+                            src_is_remote, dest_is_remote,
+                            &mut src_provider, &mut dest_provider,
+                        );
+                        if copy_result.is_ok() {
+                            // Delete source
+                            if src_is_remote {
+                                if let Some(ref mut prov) = src_provider {
+                                    let path_str = meta.path.to_string_lossy().to_string();
+                                    prov.delete(&path_str).map_err(|e| e.to_string())
+                                } else {
+                                    Ok(())
+                                }
+                            } else {
+                                std::fs::remove_file(&meta.path).map_err(|e| e.to_string())
+                            }
+                        } else {
+                            copy_result
+                        }
+                    }
+                    FileOperation::Delete => unreachable!(),
+                };
+
+                // Update bytes done (approximate: add entire file size after completion)
+                bytes_done.fetch_add(meta.size, Ordering::Relaxed);
+
+                match result {
+                    Ok(()) => count += 1,
+                    Err(e) => errors.push(format!("{}: {}", meta.path.display(), e)),
+                }
+            }
+
+            let op_name = match operation {
+                FileOperation::Copy => "Copied",
+                FileOperation::Move => "Moved",
+                FileOperation::Delete => "Deleted",
+            }.to_string();
+
+            let _ = tx.send(TaskResult::RemoteFileOpCompleted {
+                result: FileOpResult { count, errors, op_name },
+                src_provider,
+                dest_provider,
+                active_side,
+            });
+        });
+
+        BackgroundTask {
+            receiver: rx,
+            progress_rx: Some(progress_rx),
+            _handle: handle,
+        }
+    }
+
+    /// Helper: copy one file between providers.
+    fn remote_copy_one(
+        src_path: &PathBuf,
+        dest_file: &PathBuf,
+        modified: Option<std::time::SystemTime>,
+        permissions: u32,
+        src_is_remote: bool,
+        dest_is_remote: bool,
+        src_provider: &mut Option<Box<dyn PanelProvider>>,
+        dest_provider: &mut Option<Box<dyn PanelProvider>>,
+    ) -> Result<(), String> {
+        let path_str = src_path.to_string_lossy().to_string();
+
+        match (src_is_remote, dest_is_remote) {
+            (true, false) => {
+                // Remote to local: download
+                let prov = src_provider.as_mut().unwrap();
+                let data = prov.read_file(&path_str).map_err(|e| e.to_string())?;
+                std::fs::write(dest_file, data).map_err(|e| e.to_string())?;
+                apply_local_attributes(dest_file, modified, permissions);
+                Ok(())
+            }
+            (false, true) => {
+                // Local to remote: upload
+                let data = std::fs::read(src_path).map_err(|e| e.to_string())?;
+                let dest_str = dest_file.to_string_lossy().to_string();
+                let prov = dest_provider.as_mut().unwrap();
+                prov.write_file(&dest_str, &data).map_err(|e| e.to_string())?;
+                let _ = prov.set_attributes(&dest_str, modified, permissions);
+                Ok(())
+            }
+            (true, true) => {
+                // Remote to remote: download then upload
+                let data = {
+                    let prov = src_provider.as_mut().unwrap();
+                    prov.read_file(&path_str).map_err(|e| e.to_string())?
+                };
+                let dest_str = dest_file.to_string_lossy().to_string();
+                let prov = dest_provider.as_mut().unwrap();
+                prov.write_file(&dest_str, &data).map_err(|e| e.to_string())?;
+                let _ = prov.set_attributes(&dest_str, modified, permissions);
+                Ok(())
+            }
+            (false, false) => {
+                // Should not happen for remote ops, but handle gracefully
+                std::fs::copy(src_path, dest_file).map_err(|e| e.to_string())?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Apply file attributes (modification time, permissions) to a local file.
+fn apply_local_attributes(dest: &std::path::Path, modified: Option<std::time::SystemTime>, permissions: u32) {
+    if let Some(mtime) = modified {
+        if let Ok(file) = std::fs::File::options().write(true).open(dest) {
+            let _ = file.set_modified(mtime);
+        }
+    }
+    #[cfg(unix)]
+    if permissions != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(permissions));
     }
 }

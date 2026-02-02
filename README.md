@@ -229,6 +229,7 @@ run_executables = true
 autosave = false  # Auto-save config on exit
 shell = ""  # Override shell (e.g., "pwsh", "cmd.exe", "/bin/zsh"). Empty = auto-detect
 view_plugin_first = false  # true = F3 checks viewer plugins first; false = built-in viewer first
+remote_transfer_limit_mb = 512  # Confirm before remote transfers larger than this (0 = no limit)
 
 [display]
 view_mode = "brief"

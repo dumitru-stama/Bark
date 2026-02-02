@@ -23,6 +23,12 @@ pub enum SimpleConfirmAction {
     DeletePluginConnection { scheme: String, name: String },
     /// Delete a favorite path
     DeleteFavorite { path: String },
+    /// Proceed with a large remote file transfer after user confirmation
+    LargeRemoteTransfer {
+        operation: FileOperation,
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+    },
 }
 
 /// Content type for the file viewer

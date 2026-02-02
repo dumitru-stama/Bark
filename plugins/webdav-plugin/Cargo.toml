@@ -11,5 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 bark-plugin-api = { path = "../../plugin-api" }
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls"] }
 roxmltree = "0.20"

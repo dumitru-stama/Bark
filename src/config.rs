@@ -247,6 +247,13 @@ pub struct GeneralConfig {
     /// Try plugin viewers before built-in viewer on F3
     #[serde(default)]
     pub view_plugin_first: bool,
+    /// Max size (MB) for remote transfers before confirmation prompt (0 = no limit)
+    #[serde(default = "default_remote_transfer_limit_mb")]
+    pub remote_transfer_limit_mb: u64,
+}
+
+fn default_remote_transfer_limit_mb() -> u64 {
+    512
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +467,7 @@ impl Default for GeneralConfig {
             last_left_view: None,
             last_right_view: None,
             view_plugin_first: false,
+            remote_transfer_limit_mb: 512,
         }
     }
 }
@@ -619,6 +627,10 @@ shell = ""
 # When false (default), F3 opens the built-in hex/text viewer; use F2 to pick a plugin
 # When true, F3 tries matching plugins first and falls back to the built-in viewer
 view_plugin_first = false
+
+# Maximum size (MB) for remote file transfers before showing a confirmation prompt
+# Set to 0 to disable the size guard (no confirmation regardless of size)
+remote_transfer_limit_mb = 512
 
 [display]
 # Default view mode: "brief" (two columns) or "full" (detailed list)
@@ -1031,6 +1043,7 @@ impl Config {
             general["run_executables"] = value(self.general.run_executables);
             general["autosave"] = value(self.general.autosave);
             general["view_plugin_first"] = value(self.general.view_plugin_first);
+            general["remote_transfer_limit_mb"] = value(self.general.remote_transfer_limit_mb as i64);
 
             // Update last paths (these are optional)
             if let Some(ref path) = self.general.last_left_path {

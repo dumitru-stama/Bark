@@ -168,6 +168,17 @@ impl Panel {
         })
     }
 
+    /// Temporarily extract the provider, replacing it with a dummy LocalProvider.
+    /// Use `restore_provider()` to put the real provider back.
+    pub fn take_provider(&mut self) -> Box<dyn PanelProvider> {
+        std::mem::replace(&mut self.provider, Box::new(LocalProvider::new()))
+    }
+
+    /// Restore a previously taken provider.
+    pub fn restore_provider(&mut self, provider: Box<dyn PanelProvider>) {
+        self.provider = provider;
+    }
+
     /// Check if this panel is browsing a remote filesystem
     pub fn is_remote(&self) -> bool {
         !self.provider.is_local()
