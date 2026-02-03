@@ -468,7 +468,7 @@ impl BackgroundTask {
                     FileOperation::Copy => {
                         Self::remote_copy_one(
                             &meta.path, &dest_file, meta.modified, meta.permissions,
-                            src_is_remote, dest_is_remote,
+                            meta.is_dir, src_is_remote, dest_is_remote,
                             &mut src_provider, &mut dest_provider,
                         )
                     }
@@ -476,7 +476,7 @@ impl BackgroundTask {
                         // Move = copy + delete source
                         let copy_result = Self::remote_copy_one(
                             &meta.path, &dest_file, meta.modified, meta.permissions,
-                            src_is_remote, dest_is_remote,
+                            meta.is_dir, src_is_remote, dest_is_remote,
                             &mut src_provider, &mut dest_provider,
                         );
                         if copy_result.is_ok() {
@@ -528,18 +528,31 @@ impl BackgroundTask {
         }
     }
 
-    /// Helper: copy one file between providers.
+    /// Helper: copy one file or directory between providers.
     fn remote_copy_one(
         src_path: &PathBuf,
         dest_file: &PathBuf,
         modified: Option<std::time::SystemTime>,
         permissions: u32,
+        is_dir: bool,
         src_is_remote: bool,
         dest_is_remote: bool,
         src_provider: &mut Option<Box<dyn PanelProvider>>,
         dest_provider: &mut Option<Box<dyn PanelProvider>>,
     ) -> Result<(), String> {
         let path_str = src_path.to_string_lossy().to_string();
+
+        // Directory entries: create on destination side
+        if is_dir {
+            if dest_is_remote {
+                let dest_str = dest_file.to_string_lossy().to_string();
+                let prov = dest_provider.as_mut().unwrap();
+                prov.mkdir(&dest_str).map_err(|e| e.to_string())?;
+            } else {
+                std::fs::create_dir_all(dest_file).map_err(|e| e.to_string())?;
+            }
+            return Ok(());
+        }
 
         match (src_is_remote, dest_is_remote) {
             (true, false) => {

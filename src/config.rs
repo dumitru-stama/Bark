@@ -460,7 +460,7 @@ impl Default for GeneralConfig {
         Self {
             show_hidden: true,
             follow_symlinks: true,
-            remember_path: true,
+            remember_path: false,
             edit_mode_always: true,
             run_executables: true,
             autosave: false,
@@ -623,7 +623,7 @@ show_hidden = true
 follow_symlinks = true
 
 # Save and restore panel paths between sessions
-remember_path = true
+remember_path = false
 
 # Always keep command line in edit mode (typing goes to command line, not vim navigation)
 edit_mode_always = true

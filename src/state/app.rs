@@ -3560,12 +3560,14 @@ impl App {
 
                     if !result.errors.is_empty() {
                         self.active_panel_mut().error = Some(format!(
-                            "{} {}, {} errors: {}",
+                            "{} {}, {} errors",
                             result.op_name,
                             result.count,
                             result.errors.len(),
-                            result.errors.first().unwrap_or(&String::new())
                         ));
+                        for err in &result.errors {
+                            self.add_shell_output(format!("  Error: {}", err));
+                        }
                     } else {
                         self.add_shell_output(format!("{} {} file(s)", result.op_name, result.count));
                     }
@@ -3597,13 +3599,17 @@ impl App {
                     self.refresh_git_status();
 
                     if !result.errors.is_empty() {
+                        // Show summary in panel error
                         self.active_panel_mut().error = Some(format!(
-                            "{} {}, {} errors: {}",
+                            "{} {}, {} errors",
                             result.op_name,
                             result.count,
                             result.errors.len(),
-                            result.errors.first().unwrap_or(&String::new())
                         ));
+                        // Log each error to shell history for debugging
+                        for err in &result.errors {
+                            self.add_shell_output(format!("  Error: {}", err));
+                        }
                     } else {
                         self.add_shell_output(format!("{} {} file(s)", result.op_name, result.count));
                     }

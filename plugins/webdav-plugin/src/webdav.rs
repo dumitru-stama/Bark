@@ -115,10 +115,11 @@ impl ProviderPlugin for WebdavProviderPlugin {
         let verify_ssl = config.get("verify_ssl").map(|v| matches!(v, "true" | "1" | "yes" | "on")).unwrap_or(true);
         let initial_path = config.get("path").map(|s| s.to_string());
 
-        // Build HTTP client
+        // Build HTTP client — no global timeout; per-request timeouts are set
+        // on each call instead (short for metadata ops, scaled for transfers).
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(!verify_ssl)
-            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| ProviderError::Connection(format!("Failed to create HTTP client: {}", e)))?;
 
@@ -176,24 +177,62 @@ pub struct WebdavProviderSession {
 }
 
 impl WebdavProviderSession {
-    /// Build the full URL for a path
+    /// Build the full URL for a path, percent-encoding each segment
     fn build_url(&self, path: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
         let path = path.trim_start_matches('/');
         if path.is_empty() {
             format!("{}/", base)
         } else {
-            format!("{}/{}", base, path)
+            let encoded: Vec<String> = path.split('/').map(urlencode_segment).collect();
+            format!("{}/{}", base, encoded.join("/"))
         }
     }
 
-    /// Create a request builder with basic auth if credentials are set
+    /// Create a request builder with basic auth and a 30s metadata timeout.
     fn request(&self, method: reqwest::Method, url: &str) -> reqwest::blocking::RequestBuilder {
-        let mut req = self.client.request(method, url);
+        let mut req = self.client.request(method, url)
+            .timeout(std::time::Duration::from_secs(30));
         if !self.username.is_empty() {
             req = req.basic_auth(&self.username, Some(&self.password));
         }
         req
+    }
+
+    /// Create a request builder with a timeout scaled for data transfer size.
+    /// Minimum 60s, plus 60s per 10 MB.
+    fn transfer_request(&self, method: reqwest::Method, url: &str, data_len: usize) -> reqwest::blocking::RequestBuilder {
+        let secs = 60 + (data_len as u64 / (10 * 1024 * 1024)) * 60;
+        let mut req = self.client.request(method, url)
+            .timeout(std::time::Duration::from_secs(secs));
+        if !self.username.is_empty() {
+            req = req.basic_auth(&self.username, Some(&self.password));
+        }
+        req
+    }
+
+    /// Ensure all parent directories exist for a given path by issuing MKCOL requests.
+    /// Silently ignores errors (directory may already exist).
+    fn ensure_parent_dirs(&self, path: &str) {
+        let path = path.trim_start_matches('/');
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() <= 1 {
+            return; // File is at the root level, no parents to create
+        }
+
+        let mut current = String::new();
+        for part in &parts[..parts.len() - 1] {
+            if current.is_empty() {
+                current = part.to_string();
+            } else {
+                current = format!("{}/{}", current, part);
+            }
+            let url = self.build_url(&current);
+            let _ = self.request(
+                reqwest::Method::from_bytes(b"MKCOL").unwrap(),
+                &url,
+            ).send();
+        }
     }
 
     /// Parse PROPFIND XML response to get file entries
@@ -347,9 +386,10 @@ impl ProviderSession for WebdavProviderSession {
     fn read_file(&mut self, path: &str) -> ProviderResult<Vec<u8>> {
         let url = self.build_url(path);
 
-        let mut response = self.request(reqwest::Method::GET, &url)
+        // Use a generous timeout for downloads (size unknown upfront)
+        let mut response = self.transfer_request(reqwest::Method::GET, &url, 100 * 1024 * 1024)
             .send()
-            .map_err(|e| ProviderError::Connection(format!("GET failed: {}", e)))?;
+            .map_err(|e| ProviderError::Connection(format!("GET failed for {}: {}", path, e)))?;
 
         if response.status().is_client_error() {
             if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -369,14 +409,17 @@ impl ProviderSession for WebdavProviderSession {
     }
 
     fn write_file(&mut self, path: &str, data: &[u8]) -> ProviderResult<()> {
+        // Ensure parent directories exist before uploading
+        self.ensure_parent_dirs(path);
+
         let url = self.build_url(path);
 
-        let response = self.request(reqwest::Method::PUT, &url)
+        let response = self.transfer_request(reqwest::Method::PUT, &url, data.len())
             .header("Content-Type", "application/octet-stream")
             .header("Content-Length", data.len().to_string())
             .body(data.to_vec())
             .send()
-            .map_err(|e| ProviderError::Connection(format!("PUT failed: {}", e)))?;
+            .map_err(|e| ProviderError::Connection(format!("PUT failed for {}: {}", path, e)))?;
 
         if response.status().is_client_error() || response.status().is_server_error() {
             return Err(ProviderError::Other(format!(
@@ -499,6 +542,23 @@ fn extract_host(url: &str) -> Option<&str> {
     let url = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
     let end = url.find('/').unwrap_or(url.len());
     Some(&url[..end])
+}
+
+/// Percent-encode a single URL path segment (RFC 3986 unreserved chars are kept as-is)
+fn urlencode_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len() * 2);
+    for byte in segment.bytes() {
+        match byte {
+            // unreserved: ALPHA / DIGIT / "-" / "." / "_" / "~"
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
 }
 
 /// Simple URL decoding (handles %XX sequences)
