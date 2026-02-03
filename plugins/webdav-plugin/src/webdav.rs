@@ -117,21 +117,45 @@ impl ProviderPlugin for WebdavProviderPlugin {
 
         // Build HTTP client — no global timeout; per-request timeouts are set
         // on each call instead (short for metadata ops, scaled for transfers).
+        // Disable automatic redirects: reqwest's default policy downgrades
+        // PUT/MKCOL to GET on 301/302, which causes 405 on WebDAV servers.
+        // We handle redirects manually in send_following_redirects().
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(!verify_ssl)
             .connect_timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ProviderError::Connection(format!("Failed to create HTTP client: {}", e)))?;
 
-        // Test connection with OPTIONS request
-        let base_url = url.trim_end_matches('/');
+        // Test connection with OPTIONS request, following redirects to find
+        // the real base URL (some servers redirect http→https or add a trailing path).
+        let mut base_url = url.trim_end_matches('/').to_string();
         let test_url = format!("{}/", base_url);
         let mut req = client.request(reqwest::Method::OPTIONS, &test_url);
         if !username.is_empty() {
             req = req.basic_auth(&username, Some(&password));
         }
-        let response = req.send()
+        let mut response = req.send()
             .map_err(|e| ProviderError::Connection(format!("Failed to connect: {}", e)))?;
+
+        // Follow redirects, updating base_url to the final destination
+        for _ in 0..5 {
+            if !response.status().is_redirection() {
+                break;
+            }
+            if let Some(location) = response.headers().get("location").and_then(|v| v.to_str().ok()) {
+                let new_url = location.trim_end_matches('/').to_string();
+                let mut req = client.request(reqwest::Method::OPTIONS, &format!("{}/", new_url));
+                if !username.is_empty() {
+                    req = req.basic_auth(&username, Some(&password));
+                }
+                response = req.send()
+                    .map_err(|e| ProviderError::Connection(format!("Failed to connect (redirect): {}", e)))?;
+                base_url = new_url;
+            } else {
+                break;
+            }
+        }
 
         if response.status().is_client_error() {
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
@@ -157,7 +181,7 @@ impl ProviderPlugin for WebdavProviderPlugin {
 
         Ok(Box::new(WebdavProviderSession {
             client,
-            base_url: url,
+            base_url,
             username,
             password,
             display_name,
@@ -419,12 +443,15 @@ impl ProviderSession for WebdavProviderSession {
             .header("Content-Length", data.len().to_string())
             .body(data.to_vec())
             .send()
-            .map_err(|e| ProviderError::Connection(format!("PUT failed for {}: {}", path, e)))?;
+            .map_err(|e| ProviderError::Connection(format!("PUT {}: {}", url, e)))?;
 
         if response.status().is_client_error() || response.status().is_server_error() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            let body_snippet = if body.len() > 200 { &body[..200] } else { &body };
             return Err(ProviderError::Other(format!(
-                "Failed to write file: {}",
-                response.status()
+                "PUT {} -> {} {}",
+                url, status, body_snippet
             )));
         }
 
