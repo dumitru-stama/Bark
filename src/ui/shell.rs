@@ -7,6 +7,38 @@ use ratatui::{
     widgets::Widget,
 };
 
+/// Split a string into chunks that fit within `width` characters.
+/// Returns at least one slice (empty string for empty input).
+fn wrap_line(line: &str, width: usize) -> Vec<&str> {
+    if width == 0 {
+        return vec![line];
+    }
+    if line.len() <= width {
+        return vec![line];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < line.len() {
+        let end = (start + width).min(line.len());
+        // Avoid splitting in the middle of a multi-byte char
+        let end = if end < line.len() {
+            let mut e = end;
+            while e > start && !line.is_char_boundary(e) {
+                e -= 1;
+            }
+            if e == start { end } else { e }
+        } else {
+            end
+        };
+        chunks.push(&line[start..end]);
+        start = end;
+    }
+    if chunks.is_empty() {
+        chunks.push("");
+    }
+    chunks
+}
+
 /// Parse ANSI escape codes and render styled text to buffer
 pub(crate) fn render_ansi_string(x: u16, y: u16, s: &str, max_width: usize, buf: &mut Buffer) {
     let mut current_x = x;
@@ -244,14 +276,17 @@ impl Widget for ShellHistoryViewer<'_> {
         let content_h = Self::content_height(area);
         let status_y = area.y + area.height - 1;
 
-        // Render history lines (scroll 0 = bottom)
+        // Build wrapped visual lines from history
         if content_h > 0 && !self.history.is_empty() {
-            let end = self.history.len().saturating_sub(self.scroll);
+            let visual_lines: Vec<&str> = self.history.iter()
+                .flat_map(|line| wrap_line(line, width))
+                .collect();
+
+            let end = visual_lines.len().saturating_sub(self.scroll);
             let start = end.saturating_sub(content_h);
             let visible_count = end - start;
-            // Top-align: lines start at area.y
             let history_start_y = area.y + (content_h - visible_count) as u16;
-            for (i, line) in self.history[start..end].iter().enumerate() {
+            for (i, line) in visual_lines[start..end].iter().enumerate() {
                 let y = history_start_y + i as u16;
                 render_ansi_string(area.x, y, line, width, buf);
             }
@@ -302,13 +337,17 @@ impl Widget for ShellArea<'_> {
 
         // Render history lines (with scroll offset support, bottom-aligned above prompt)
         if history_lines > 0 && !self.history.is_empty() {
-            // end points past the last line we want to show
-            let end = self.history.len().saturating_sub(self.scroll_offset);
+            // Build wrapped visual lines
+            let visual_lines: Vec<&str> = self.history.iter()
+                .flat_map(|line| wrap_line(line, width))
+                .collect();
+
+            let end = visual_lines.len().saturating_sub(self.scroll_offset);
             let start = end.saturating_sub(history_lines);
             let visible_count = end - start;
             // Position history lines just above the prompt
             let history_start_y = prompt_y - visible_count as u16;
-            for (i, line) in self.history[start..end].iter().enumerate() {
+            for (i, line) in visual_lines[start..end].iter().enumerate() {
                 let y = history_start_y + i as u16;
                 // Render with ANSI color support
                 render_ansi_string(area.x, y, line, width, buf);

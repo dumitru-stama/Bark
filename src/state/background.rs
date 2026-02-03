@@ -434,9 +434,14 @@ impl BackgroundTask {
 
         let files_total = source_metas.len();
         let bytes_total: u64 = source_metas.iter().map(|m| m.size).sum();
-        let is_rename = source_metas.len() == 1 && !dest.is_dir();
         let src_is_remote = src_provider.is_some();
         let dest_is_remote = dest_provider.is_some();
+        // For local destinations, check the actual filesystem. For remote
+        // destinations the path doesn't exist locally, so fall back to never
+        // treating it as a rename (always append the filename).
+        let is_rename = source_metas.len() == 1
+            && !dest_is_remote
+            && !dest.is_dir();
 
         let handle = thread::spawn(move || {
             let mut count = 0usize;
@@ -529,6 +534,7 @@ impl BackgroundTask {
     }
 
     /// Helper: copy one file or directory between providers.
+    /// Directories are copied recursively.
     fn remote_copy_one(
         src_path: &PathBuf,
         dest_file: &PathBuf,
@@ -542,7 +548,7 @@ impl BackgroundTask {
     ) -> Result<(), String> {
         let path_str = src_path.to_string_lossy().to_string();
 
-        // Directory entries: create on destination side
+        // Directory entries: create on destination, then recurse into contents
         if is_dir {
             if dest_is_remote {
                 let dest_str = dest_file.to_string_lossy().to_string();
@@ -551,6 +557,54 @@ impl BackgroundTask {
             } else {
                 std::fs::create_dir_all(dest_file).map_err(|e| e.to_string())?;
             }
+
+            // List source directory contents and copy each entry recursively
+            let entries = if src_is_remote {
+                let prov = src_provider.as_mut().unwrap();
+                prov.list_directory(&path_str).map_err(|e| e.to_string())?
+            } else {
+                // Local source: enumerate directory
+                let mut entries = Vec::new();
+                let read_dir = std::fs::read_dir(src_path).map_err(|e| e.to_string())?;
+                for entry in read_dir {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    let meta = entry.metadata().map_err(|e| e.to_string())?;
+                    entries.push(crate::fs::FileEntry {
+                        name: entry.file_name().to_string_lossy().to_string(),
+                        path: entry.path(),
+                        is_dir: meta.is_dir(),
+                        size: meta.len(),
+                        modified: meta.modified().ok(),
+                        is_hidden: entry.file_name().to_string_lossy().starts_with('.'),
+                        permissions: {
+                            #[cfg(unix)]
+                            { use std::os::unix::fs::PermissionsExt; meta.permissions().mode() }
+                            #[cfg(not(unix))]
+                            { 0 }
+                        },
+                        is_symlink: meta.is_symlink(),
+                        symlink_target: None,
+                        owner: String::new(),
+                        group: String::new(),
+                    });
+                }
+                entries
+            };
+
+            for entry in &entries {
+                // Skip parent directory entries
+                if entry.name == ".." {
+                    continue;
+                }
+                let child_src = entry.path.clone();
+                let child_dest = dest_file.join(&entry.name);
+                Self::remote_copy_one(
+                    &child_src, &child_dest, entry.modified, entry.permissions,
+                    entry.is_dir, src_is_remote, dest_is_remote,
+                    src_provider, dest_provider,
+                )?;
+            }
+
             return Ok(());
         }
 
@@ -559,6 +613,9 @@ impl BackgroundTask {
                 // Remote to local: download
                 let prov = src_provider.as_mut().unwrap();
                 let data = prov.read_file(&path_str).map_err(|e| e.to_string())?;
+                if let Some(parent) = dest_file.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
                 std::fs::write(dest_file, data).map_err(|e| e.to_string())?;
                 apply_local_attributes(dest_file, modified, permissions);
                 Ok(())

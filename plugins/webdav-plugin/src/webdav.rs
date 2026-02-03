@@ -448,10 +448,11 @@ impl ProviderSession for WebdavProviderSession {
         if response.status().is_client_error() || response.status().is_server_error() {
             let status = response.status();
             let body = response.text().unwrap_or_default();
-            let body_snippet = if body.len() > 200 { &body[..200] } else { &body };
+            let reason = extract_error_reason(&body);
             return Err(ProviderError::Other(format!(
-                "PUT {} -> {} {}",
-                url, status, body_snippet
+                "PUT {} -> {}{}",
+                url, status,
+                if reason.is_empty() { String::new() } else { format!(" ({})", reason) }
             )));
         }
 
@@ -563,6 +564,35 @@ impl Drop for WebdavProviderSession {
 // ============================================================================
 // Helper functions
 // ============================================================================
+
+/// Extract a human-readable reason from a WebDAV error response body.
+/// Strips HTML tags and collapses whitespace. Returns at most 120 chars.
+fn extract_error_reason(body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        return String::new();
+    }
+
+    // Strip HTML tags
+    let mut result = String::with_capacity(body.len());
+    let mut in_tag = false;
+    for c in body.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => { in_tag = false; result.push(' '); }
+            _ if !in_tag => result.push(c),
+            _ => {}
+        }
+    }
+
+    // Collapse whitespace and trim
+    let collapsed: String = result.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() > 120 {
+        format!("{}...", &collapsed[..120])
+    } else {
+        collapsed
+    }
+}
 
 /// Extract host from URL
 fn extract_host(url: &str) -> Option<&str> {

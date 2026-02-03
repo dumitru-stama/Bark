@@ -88,8 +88,15 @@ impl App {
         let config = Config::load();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
 
-        // Determine starting paths
-        let left_path = if config.general.remember_path {
+        // Determine starting paths.
+        // Only restore saved paths when remember_path is on AND the user launched
+        // from their home directory (no explicit cd). If cwd is anything else,
+        // the user navigated there intentionally — respect that.
+        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        let use_saved = config.general.remember_path
+            && home.as_ref().is_some_and(|h| h == &cwd);
+
+        let left_path = if use_saved {
             config.general.last_left_path
                 .as_ref()
                 .map(PathBuf::from)
@@ -99,7 +106,7 @@ impl App {
             cwd.clone()
         };
 
-        let right_path = if config.general.remember_path {
+        let right_path = if use_saved {
             config.general.last_right_path
                 .as_ref()
                 .map(PathBuf::from)
@@ -1594,15 +1601,24 @@ impl App {
             dest
         };
 
-        // Only check for overwrites on local-to-local copy/move
-        let src_is_remote = self.active_panel().is_remote();
-        let dest_is_local = !match self.active_panel {
-            Side::Left => self.right_panel.is_remote(),
-            Side::Right => self.left_panel.is_remote(),
-        };
+        // Check for overwrite conflicts on copy/move (local and remote)
+        if !matches!(operation, FileOperation::Delete) {
+            let dest_is_remote = match self.active_panel {
+                Side::Left => self.right_panel.is_remote(),
+                Side::Right => self.left_panel.is_remote(),
+            };
 
-        if !matches!(operation, FileOperation::Delete) && !src_is_remote && dest_is_local {
-            let conflicts = Self::find_overwrite_conflicts(&sources, &dest);
+            let conflicts = if dest_is_remote {
+                // Remote destination: check against the destination panel's loaded entries
+                let dest_panel = match self.active_panel {
+                    Side::Left => &self.right_panel,
+                    Side::Right => &self.left_panel,
+                };
+                Self::find_remote_overwrite_conflicts(&sources, &dest_panel.entries)
+            } else {
+                Self::find_overwrite_conflicts(&sources, &dest)
+            };
+
             if !conflicts.is_empty() {
                 self.mode = Mode::OverwriteConfirm {
                     operation,
@@ -1622,7 +1638,7 @@ impl App {
         self.execute_file_operation(operation, sources, dest);
     }
 
-    /// Find destination files that already exist (overwrite conflicts).
+    /// Find destination files that already exist (overwrite conflicts) — local filesystem.
     fn find_overwrite_conflicts(sources: &[PathBuf], dest: &Path) -> Vec<PathBuf> {
         // Single file to a non-directory dest = rename; check if dest itself exists
         if sources.len() == 1 && !dest.is_dir() {
@@ -1635,6 +1651,18 @@ impl App {
             let name = src.file_name()?;
             let dest_file = dest.join(name);
             if dest_file.exists() { Some(src.clone()) } else { None }
+        }).collect()
+    }
+
+    /// Find overwrite conflicts against a remote panel's loaded entries.
+    fn find_remote_overwrite_conflicts(sources: &[PathBuf], dest_entries: &[crate::fs::FileEntry]) -> Vec<PathBuf> {
+        let dest_names: std::collections::HashSet<&str> = dest_entries.iter()
+            .filter(|e| e.name != "..")
+            .map(|e| e.name.as_str())
+            .collect();
+        sources.iter().filter_map(|src| {
+            let name = src.file_name()?.to_str()?;
+            if dest_names.contains(name) { Some(src.clone()) } else { None }
         }).collect()
     }
 
