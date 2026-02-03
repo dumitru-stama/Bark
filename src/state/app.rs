@@ -210,7 +210,12 @@ impl App {
     }
 
     /// Spawn the persistent shell.  Safe to call multiple times (respawns if dead).
+    /// On Windows 10, ConPTY is too buggy (blocks on close, doesn't relay
+    /// output), so the persistent shell is disabled entirely.
     pub fn init_shell(&mut self) {
+        if crate::persistent_shell::is_windows_10_or_older() {
+            return;
+        }
         let cwd = match self.active_panel {
             Side::Left => &self.left_panel.path,
             Side::Right => &self.right_panel.path,
@@ -281,9 +286,11 @@ impl App {
         let last_dir = self.active_panel().path.to_string_lossy();
 
         // Try environment variable first, then default to ~/.bark_lastdir
+        // On Windows, HOME is typically unset; use USERPROFILE instead
         let file_path = std::env::var("BARK_LASTDIR")
             .unwrap_or_else(|_| {
                 std::env::var("HOME")
+                    .or_else(|_| std::env::var("USERPROFILE"))
                     .map(|h| format!("{}/.bark_lastdir", h))
                     .unwrap_or_else(|_| "/tmp/.bark_lastdir".to_string())
             });
@@ -490,6 +497,14 @@ impl App {
         match self.active_panel {
             Side::Left => &mut self.right_panel,
             Side::Right => &mut self.left_panel,
+        }
+    }
+
+    /// Get a mutable reference to a panel by side
+    pub fn panel_mut(&mut self, side: Side) -> &mut Panel {
+        match side {
+            Side::Left => &mut self.left_panel,
+            Side::Right => &mut self.right_panel,
         }
     }
 
@@ -2079,16 +2094,12 @@ impl App {
 
     /// Handle selection of a panel source
     pub fn select_source(&mut self, target: Side, source: &PanelSource) {
-        let panel = match target {
-            Side::Left => &mut self.left_panel,
-            Side::Right => &mut self.right_panel,
-        };
-
         match source {
             PanelSource::Drive { letter, .. } => {
                 // Windows drive selection - switch to local filesystem
                 let new_path = PathBuf::from(format!("{}\\", letter));
                 if new_path.exists() {
+                    let panel = self.panel_mut(target);
                     panel.set_local_provider(new_path);
                     panel.cursor = 0;
                     panel.scroll_offset = 0;
@@ -2098,26 +2109,40 @@ impl App {
                 // Quick access path (home, root, etc.) - switch to local filesystem
                 let new_path = PathBuf::from(path);
                 if new_path.exists() {
+                    let panel = self.panel_mut(target);
                     panel.set_local_provider(new_path);
                     panel.cursor = 0;
                     panel.scroll_offset = 0;
                 }
             }
             PanelSource::Provider { connection_string, connection_name, info } => {
-                // Connect based on provider type
-                match info.provider_type {
+                // Build a cache key for this connection
+                let cache_key = match info.provider_type {
+                    ProviderType::Scp => connection_string.clone(),
+                    ProviderType::Plugin => format!("{}:{}", connection_string, connection_name),
+                    _ => String::new(),
+                };
+                let conn_name = connection_name.clone();
+                let conn_str = connection_string.clone();
+                let ptype = info.provider_type;
+
+                // Try to restore from cache first
+                if !cache_key.is_empty() && self.panel_mut(target).restore_cached_remote(&cache_key) {
+                    self.add_shell_output(format!("Restored connection to {}", conn_name));
+                    self.mode = Mode::Normal;
+                    return;
+                }
+
+                // No cache hit — connect normally
+                match ptype {
                     ProviderType::Scp => {
-                        let conn_str = connection_string.clone();
                         self.connect_saved_scp(target, &conn_str);
                     }
                     ProviderType::Plugin => {
-                        // Plugin connection — find saved connection and open dialog
-                        let name = connection_name.clone();
-                        let scheme = connection_string.clone(); // We store scheme in connection_string for plugin connections
-                        self.edit_plugin_connection(target, &scheme, &name);
+                        self.edit_plugin_connection(target, &conn_str, &conn_name);
                     }
                     _ => {
-                        panel.error = Some(format!("{:?} connections not yet supported", info.provider_type));
+                        self.panel_mut(target).error = Some(format!("{:?} connections not yet supported", ptype));
                     }
                 }
             }
@@ -2127,7 +2152,7 @@ impl App {
                         self.show_scp_connect_dialog(target);
                     }
                     _ => {
-                        panel.error = Some(format!("{:?} connections not yet supported", provider_type));
+                        self.panel_mut(target).error = Some(format!("{:?} connections not yet supported", *provider_type));
                     }
                 }
             }
@@ -2225,6 +2250,7 @@ impl App {
     /// Save an SCP connection from the dialog
     pub fn save_scp_connection(&mut self) {
         let Mode::ScpConnect {
+            target_panel,
             name_input,
             user_input,
             host_input,
@@ -2234,6 +2260,7 @@ impl App {
         } = &self.mode else {
             return;
         };
+        let target = *target_panel;
 
         // Validate inputs
         if name_input.trim().is_empty() {
@@ -2271,7 +2298,7 @@ impl App {
         // Save to config
         match self.config.add_connection(conn) {
             Ok(()) => {
-                self.mode = Mode::Normal;
+                self.show_source_selector(target);
             }
             Err(e) => {
                 if let Mode::ScpConnect { error, .. } = &mut self.mode {
@@ -2336,6 +2363,7 @@ impl App {
             initial_path,
             display_name.clone(),
             None, // No connection string for manual connections
+            None, // No connection key for manual connections
         );
 
         self.background_task = Some(task);
@@ -2368,12 +2396,14 @@ impl App {
         let conn_str = connection_string.to_string();
 
         // Spawn background connection task
+        let connection_key = Some(connection_string.to_string());
         let task = BackgroundTask::connect_scp(
             conn_info,
             target,
             initial_path,
             display_name.clone(),
             Some(conn_str), // Connection string for password retry
+            connection_key,
         );
 
         self.background_task = Some(task);
@@ -2417,12 +2447,14 @@ impl App {
         conn_info.auth = ScpAuth::Password(password);
 
         // Spawn background connection task
+        let connection_key = Some(conn_str.clone());
         let task = BackgroundTask::connect_scp(
             conn_info,
             target,
             initial_path,
             display.clone(),
             None, // No retry on password auth failure
+            connection_key,
         );
 
         self.background_task = Some(task);
@@ -2529,7 +2561,7 @@ impl App {
                         .find(|f| f.field_type == bark_plugin_api::DialogFieldType::Password)
                         .map(|f| f.id.clone())
                 });
-            self.show_plugin_connect_dialog_with_values(target, scheme, preset, password_field.as_deref());
+            self.show_plugin_connect_dialog_with_values(target, scheme, preset, password_field.as_deref(), Some(name.to_string()));
         }
     }
 
@@ -2573,6 +2605,7 @@ impl App {
             cursors,
             focus: 0,
             error: None,
+            editing_name: None,
         };
     }
 
@@ -2584,6 +2617,7 @@ impl App {
         scheme: &str,
         preset_values: std::collections::HashMap<String, String>,
         focus_field: Option<&str>,
+        editing_name: Option<String>,
     ) {
         // Find the plugin by scheme
         let plugin = match self.plugins.find_provider_by_scheme(scheme) {
@@ -2624,6 +2658,7 @@ impl App {
             cursors,
             focus,
             error: None,
+            editing_name,
         };
     }
 
@@ -2659,6 +2694,13 @@ impl App {
             config.set(&field.id, value);
         }
 
+        // Set config.name from the "name" dialog field (used as display_name by script providers)
+        if let Some(name) = config.get("name") {
+            if !name.is_empty() {
+                config.name = name.to_string();
+            }
+        }
+
         // Validate
         if let Err(e) = plugin.validate_config(&config) {
             *error = Some(e.to_string());
@@ -2666,17 +2708,14 @@ impl App {
         }
 
         // Get connection info for display
-        let display_name = if let Some(name) = config.get("name") {
-            if name.is_empty() {
-                plugin.info().name.clone()
-            } else {
-                name.to_string()
-            }
+        let display_name = if !config.name.is_empty() {
+            config.name.clone()
         } else {
             plugin.info().name.clone()
         };
 
         let target = *target_panel;
+        let connection_key = Some(format!("{}:{}", plugin_scheme, display_name));
 
         // Use background task for all plugin connections
         let task = BackgroundTask::connect_plugin(
@@ -2684,6 +2723,7 @@ impl App {
             config,
             target,
             display_name.clone(),
+            connection_key,
         );
 
         self.background_task = Some(task);
@@ -2697,15 +2737,19 @@ impl App {
     /// Save a plugin connection (placeholder - requires config storage)
     pub fn save_plugin_connection(&mut self) {
         let Mode::PluginConnect {
+            target_panel,
             plugin_scheme,
             fields,
             values,
             error,
+            editing_name,
             ..
         } = &mut self.mode
         else {
             return;
         };
+        let editing_name = editing_name.clone();
+        let target = *target_panel;
 
         // Build connection name from the "name" field
         let name = fields
@@ -2740,13 +2784,20 @@ impl App {
             fields: saved_fields,
         };
 
+        // If editing and name changed, remove the old entry first
+        if let Some(ref old_name) = editing_name {
+            if *old_name != name {
+                let _ = self.config.remove_plugin_connection(&scheme, old_name);
+            }
+        }
+
         if let Err(e) = self.config.add_plugin_connection(saved) {
             *error = Some(format!("Failed to save: {}", e));
             return;
         }
 
         self.add_shell_output(format!("Saved {} connection: {}", scheme.to_uppercase(), name));
-        self.mode = Mode::Normal;
+        self.show_source_selector(target);
     }
 
     /// Change the drive for a panel (legacy, kept for compatibility)
@@ -3420,12 +3471,12 @@ impl App {
             self.background_task = None;
 
             match result {
-                TaskResult::ScpConnected { target, provider, initial_path, display_name } => {
+                TaskResult::ScpConnected { target, provider, initial_path, display_name, connection_key } => {
                     let panel = match target {
                         Side::Left => &mut self.left_panel,
                         Side::Right => &mut self.right_panel,
                     };
-                    panel.set_provider(provider, &initial_path);
+                    panel.set_provider(provider, &initial_path, connection_key);
                     self.add_shell_output(format!("Connected to {}", display_name));
                     self.mode = Mode::Normal;
                 }
@@ -3448,7 +3499,7 @@ impl App {
                         self.mode = Mode::Normal;
                     }
                 }
-                TaskResult::PluginConnected { target, provider, initial_path, display_name, is_extension_mode, source_path, source_name } => {
+                TaskResult::PluginConnected { target, provider, initial_path, display_name, is_extension_mode, source_path, source_name, connection_key } => {
                     let panel = match target {
                         Side::Left => &mut self.left_panel,
                         Side::Right => &mut self.right_panel,
@@ -3465,7 +3516,7 @@ impl App {
                         }
                     } else {
                         // Scheme-mode: regular provider switch
-                        panel.set_provider(provider, &initial_path);
+                        panel.set_provider(provider, &initial_path, connection_key);
                         self.add_shell_output(format!("Connected to {}", display_name));
                     }
                     self.mode = Mode::Normal;

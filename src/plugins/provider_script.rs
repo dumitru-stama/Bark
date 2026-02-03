@@ -304,6 +304,11 @@ impl ProviderPlugin for ScriptProviderPlugin {
             if let Some(sid) = extract_json_string(&response, "session_id") {
                 session.session_id = sid;
             }
+            if let Some(name) = extract_json_string(&response, "display_name") {
+                if !name.is_empty() && session.display_name.is_empty() {
+                    session.display_name = name;
+                }
+            }
             session.short_label = extract_json_string(&response, "short_label");
             Ok(Box::new(session))
         } else {

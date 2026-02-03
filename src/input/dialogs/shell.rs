@@ -13,6 +13,44 @@ pub fn handle_shell_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
+pub fn handle_shell_history_view(app: &mut App, key: KeyEvent, content_height: usize) {
+    let Mode::ShellHistoryView { scroll } = &mut app.mode else {
+        return;
+    };
+
+    let max_scroll = app.cmd.output.len().saturating_sub(content_height);
+
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if *scroll < max_scroll {
+                *scroll += 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            *scroll = scroll.saturating_sub(1);
+        }
+        KeyCode::PageUp => {
+            *scroll = (*scroll + content_height).min(max_scroll);
+        }
+        KeyCode::PageDown => {
+            *scroll = scroll.saturating_sub(content_height);
+        }
+        KeyCode::Home => {
+            *scroll = max_scroll;
+        }
+        KeyCode::End => {
+            *scroll = 0;
+        }
+        _ => {}
+    }
+}
+
 pub fn handle_command_history_mode(app: &mut App, key: KeyEvent) {
     let Mode::CommandHistory { selected, scroll } = &mut app.mode else {
         return;

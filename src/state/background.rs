@@ -39,6 +39,7 @@ pub enum TaskResult {
         provider: Box<ScpProvider>,
         initial_path: String,
         display_name: String,
+        connection_key: Option<String>,
     },
     /// SCP connection failed
     ScpFailed {
@@ -63,6 +64,7 @@ pub enum TaskResult {
         source_path: Option<PathBuf>,
         /// Source file name (for extension-mode providers)
         source_name: Option<String>,
+        connection_key: Option<String>,
     },
     /// Plugin provider connection failed
     PluginFailed {
@@ -118,6 +120,7 @@ impl BackgroundTask {
         initial_path: String,
         display_name: String,
         connection_string: Option<String>,
+        connection_key: Option<String>,
     ) -> Self {
         let (tx, rx) = channel::<TaskResult>();
 
@@ -131,6 +134,7 @@ impl BackgroundTask {
                         provider: Box::new(provider),
                         initial_path,
                         display_name,
+                        connection_key,
                     });
                 }
                 Err(e) => {
@@ -163,6 +167,7 @@ impl BackgroundTask {
         config: ProviderConfig,
         target: Side,
         display_name: String,
+        connection_key: Option<String>,
     ) -> Self {
         let (tx, rx) = channel::<TaskResult>();
         let initial_path = config.get("path").unwrap_or("/").to_string();
@@ -180,6 +185,7 @@ impl BackgroundTask {
                         is_extension_mode: false,
                         source_path: None,
                         source_name: None,
+                        connection_key,
                     });
                 }
                 Err(e) => {
@@ -235,6 +241,7 @@ impl BackgroundTask {
                         is_extension_mode: true,
                         source_path: Some(sp),
                         source_name: Some(sn),
+                        connection_key: None,
                     });
                 }
                 Err(e) => {
@@ -292,6 +299,7 @@ impl BackgroundTask {
                         is_extension_mode: true,
                         source_path: Some(sp),
                         source_name: Some(sn),
+                        connection_key: None,
                     });
                 }
                 Err(e) => {
@@ -573,15 +581,15 @@ impl BackgroundTask {
 }
 
 /// Apply file attributes (modification time, permissions) to a local file.
-fn apply_local_attributes(dest: &std::path::Path, modified: Option<std::time::SystemTime>, permissions: u32) {
+fn apply_local_attributes(dest: &std::path::Path, modified: Option<std::time::SystemTime>, _permissions: u32) {
     if let Some(mtime) = modified {
         if let Ok(file) = std::fs::File::options().write(true).open(dest) {
             let _ = file.set_modified(mtime);
         }
     }
     #[cfg(unix)]
-    if permissions != 0 {
+    if _permissions != 0 {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(permissions));
+        let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(_permissions));
     }
 }

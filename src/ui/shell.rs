@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 /// Parse ANSI escape codes and render styled text to buffer
-fn render_ansi_string(x: u16, y: u16, s: &str, max_width: usize, buf: &mut Buffer) {
+pub(crate) fn render_ansi_string(x: u16, y: u16, s: &str, max_width: usize, buf: &mut Buffer) {
     let mut current_x = x;
     let end_x = x + max_width as u16;
     let mut style = Style::default().bg(Color::Reset).fg(Color::Reset);
@@ -203,6 +203,75 @@ pub struct ShellArea<'a> {
 impl<'a> ShellArea<'a> {
     pub fn new(history: &'a [String], input: &'a str, prompt: &'a str, scroll_offset: usize) -> Self {
         Self { history, input, prompt, scroll_offset }
+    }
+}
+
+/// Full-screen shell history viewer widget (no borders, copyable text)
+pub struct ShellHistoryViewer<'a> {
+    /// Command output history
+    history: &'a [String],
+    /// Scroll offset (0 = bottom/newest)
+    scroll: usize,
+}
+
+impl<'a> ShellHistoryViewer<'a> {
+    pub fn new(history: &'a [String], scroll: usize) -> Self {
+        Self { history, scroll }
+    }
+
+    /// Height available for history content (total area minus status line)
+    pub fn content_height(area: Rect) -> usize {
+        (area.height as usize).saturating_sub(1)
+    }
+}
+
+impl Widget for ShellHistoryViewer<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.height < 2 {
+            return;
+        }
+
+        let style = Style::default().bg(Color::Reset).fg(Color::Reset);
+
+        // Clear the entire area
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                buf[(x, y)].set_char(' ').set_style(style);
+            }
+        }
+
+        let width = area.width as usize;
+        let content_h = Self::content_height(area);
+        let status_y = area.y + area.height - 1;
+
+        // Render history lines (scroll 0 = bottom)
+        if content_h > 0 && !self.history.is_empty() {
+            let end = self.history.len().saturating_sub(self.scroll);
+            let start = end.saturating_sub(content_h);
+            let visible_count = end - start;
+            // Top-align: lines start at area.y
+            let history_start_y = area.y + (content_h - visible_count) as u16;
+            for (i, line) in self.history[start..end].iter().enumerate() {
+                let y = history_start_y + i as u16;
+                render_ansi_string(area.x, y, line, width, buf);
+            }
+        }
+
+        // Status line at bottom
+        let status = format!(
+            "--- Shell history ({} lines) | Esc/Ctrl+O: close | Up/Down/PgUp/PgDn: scroll ---",
+            self.history.len()
+        );
+        let status_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        // Fill entire status line with background
+        for x in area.x..area.x + area.width {
+            buf[(x, status_y)].set_char(' ').set_style(status_style);
+        }
+        let truncated = if status.len() > width { &status[..width] } else { &status };
+        buf.set_string(area.x, status_y, truncated, status_style);
     }
 }
 

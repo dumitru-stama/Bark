@@ -390,6 +390,7 @@ impl PersistentShell {
     /// - cmd.exe: re-executes the command (no silent injection available)
     ///
     /// Output is suppressed so the TUI shell area isn't polluted.
+    #[allow(dead_code)]
     pub fn inject_history(&mut self, command: &str, cwd: &Path) -> io::Result<()> {
         let lower = self.shell_name.to_lowercase();
 
@@ -457,19 +458,180 @@ impl PersistentShell {
         });
     }
 
-    /// Shut down the persistent shell: kill child, signal reader, try to join.
+    /// Shut down the persistent shell: close PTY, kill child, exit.
     pub fn shutdown(mut self) {
         self.running.store(false, Ordering::Relaxed);
-        let _ = self.child.kill();
-        // Drop writer first to unblock the reader thread (causes EOF).
-        drop(self.writer);
-        // On Windows, ConPTY cleanup can be slow — give the reader thread
-        // a moment to notice the EOF.  If it's still stuck in a blocking
-        // read after the timeout, just detach it (the process is exiting).
-        std::thread::sleep(Duration::from_millis(200));
-        // Don't join — the reader thread may be stuck in a blocking read
-        // (especially on Windows with ConPTY).  Dropping the JoinHandle
-        // detaches the thread; it will be cleaned up at process exit.
+
+        #[cfg(not(windows))]
+        {
+            drop(self.writer);
+            drop(self.master);
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(handle) = self.reader_handle.take() {
+                let _ = handle.join();
+            }
+        }
+
+        // On Windows 10, ConPTY is buggy: ClosePseudoConsole (called
+        // by drop(master)) blocks indefinitely, and child.kill() can
+        // hang too.  Dropping PTY handles via portable-pty is not an
+        // option.  Instead, skip all destructors with mem::forget,
+        // then find and kill the conhost.exe process that ConPTY
+        // spawned as a child of our process.
+        #[cfg(windows)]
+        {
+            let child_pid = self.child.process_id();
+            // Skip all Drop impls — they block on Windows 10.
+            std::mem::forget(self.writer);
+            std::mem::forget(self.master);
+            std::mem::forget(self.child);
+            if let Some(reader) = self.reader_handle.take() {
+                std::mem::forget(reader);
+            }
+            let our_pid = std::process::id();
+            // Kill the shell process first so it isn't left attached
+            // to a dying conhost (which causes a PowerShell crash
+            // dialog with error 0xc0000142).
+            if let Some(pid) = child_pid {
+                terminate_process_by_pid(pid);
+            }
+            // Now kill the orphaned conhost.exe to prevent 100% CPU.
+            kill_child_conhosts(our_pid);
+            std::process::exit(0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows 10 ConPTY detection
+//
+// Windows 10's ConPTY is too buggy to use: ClosePseudoConsole() blocks on
+// shutdown, and the PTY often fails to relay shell output at all (Ctrl+O
+// shows a blank screen).  Windows 11 (build 22000+) fixed these issues.
+// We detect the build number at runtime to skip the persistent shell on
+// Windows 10.
+// ---------------------------------------------------------------------------
+
+/// Returns true if the OS is Windows 10 or older (build < 22000).
+/// Always returns false on non-Windows platforms.
+#[cfg(windows)]
+pub fn is_windows_10_or_older() -> bool {
+    use windows_sys::Win32::System::SystemInformation::{
+        GetVersionExW, OSVERSIONINFOW,
+    };
+    unsafe {
+        let mut info: OSVERSIONINFOW = std::mem::zeroed();
+        info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+        if GetVersionExW(&mut info) != 0 {
+            // Windows 11 starts at build 22000.
+            return info.dwBuildNumber < 22000;
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn is_windows_10_or_older() -> bool {
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Windows 10 ConPTY cleanup workaround
+//
+// Windows 10's ConPTY implementation has a known bug: ClosePseudoConsole()
+// (the documented way to tear down a ConPTY) blocks indefinitely.  This
+// means portable-pty's Drop impls for the master PTY handle hang forever,
+// and so do child.kill() and child.wait() if ConPTY is still alive.
+//
+// The result is that on exit, conhost.exe (the Console Window Host process
+// that Windows spawns to manage each ConPTY) is left orphaned and spins at
+// 100% CPU indefinitely.  Windows 11 fixed this, but Windows 10 is still
+// widely used.
+//
+// Our workaround:
+//   1. mem::forget all PTY handles (skip the blocking Drop impls entirely)
+//   2. Terminate the shell child process by PID via TerminateProcess()
+//   3. Walk the process table with CreateToolhelp32Snapshot() to find the
+//      conhost.exe that Windows spawned as a child of our process, and
+//      terminate it directly
+//   4. Call process::exit(0) since the orphaned reader thread can't be
+//      joined (it's stuck in a blocking read on the now-defunct PTY)
+//
+// The shell is killed before conhost to avoid a PowerShell crash dialog
+// (error 0xc0000142) that occurs when conhost is pulled out from under a
+// running shell.
+// ---------------------------------------------------------------------------
+
+/// Terminate a process by PID using the Windows API directly.
+#[cfg(windows)]
+fn terminate_process_by_pid(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+    };
+    unsafe {
+        let proc = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !proc.is_null() {
+            TerminateProcess(proc, 1);
+            CloseHandle(proc);
+        }
+    }
+}
+
+/// Find and terminate all conhost.exe processes whose parent is `parent_pid`.
+/// See the block comment above for why this is needed on Windows 10.
+#[cfg(windows)]
+fn kill_child_conhosts(parent_pid: u32) {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+    };
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return;
+        }
+
+        let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+
+        if Process32First(snap, &mut entry) == 0 {
+            CloseHandle(snap);
+            return;
+        }
+
+        loop {
+            if entry.th32ParentProcessID == parent_pid {
+                // Check if the executable name is "conhost.exe".
+                let name_bytes: Vec<u8> = entry
+                    .szExeFile
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|&b| b as u8)
+                    .collect();
+                if let Ok(name) = std::str::from_utf8(&name_bytes) {
+                    if name.eq_ignore_ascii_case("conhost.exe") {
+                        let proc =
+                            OpenProcess(PROCESS_TERMINATE, 0, entry.th32ProcessID);
+                        if !proc.is_null() {
+                            TerminateProcess(proc, 1);
+                            CloseHandle(proc);
+                        }
+                    }
+                }
+            }
+            if Process32Next(snap, &mut entry) == 0 {
+                break;
+            }
+        }
+
+        CloseHandle(snap);
     }
 }
 
@@ -612,6 +774,7 @@ pub fn shell_quote(s: &str) -> String {
 
 /// Check if output looks like it came from a TUI program
 /// (alternate screen sequences, full clears, etc.).
+#[allow(dead_code)]
 pub fn is_tui_output(content: &str) -> bool {
     content.contains("\x1b[?1049l")
         || content.contains("\x1b[?1049h")

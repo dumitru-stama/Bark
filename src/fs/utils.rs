@@ -19,6 +19,7 @@ fn preserve_attributes(src: &Path, dest: &Path) {
 }
 
 /// Copy a file or directory recursively, preserving attributes
+#[allow(dead_code)]
 pub fn copy_path(src: &PathBuf, dest: &PathBuf) -> std::io::Result<()> {
     if src.is_dir() {
         copy_dir_recursive(src, dest)
@@ -30,6 +31,7 @@ pub fn copy_path(src: &PathBuf, dest: &PathBuf) -> std::io::Result<()> {
 }
 
 /// Copy a directory recursively, preserving attributes
+#[allow(dead_code)]
 fn copy_dir_recursive(src: &PathBuf, dest: &PathBuf) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
 
@@ -54,6 +56,7 @@ fn copy_dir_recursive(src: &PathBuf, dest: &PathBuf) -> std::io::Result<()> {
 }
 
 /// Move a file or directory
+#[allow(dead_code)]
 pub fn move_path(src: &PathBuf, dest: &PathBuf) -> std::io::Result<()> {
     // Try rename first (fast, works on same filesystem)
     match std::fs::rename(src, dest) {

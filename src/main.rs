@@ -36,7 +36,7 @@ mod win_console;
 use state::app::App;
 use state::mode::Mode;
 use state::Side;
-use ui::{ArchivePasswordPromptDialog, CommandHistoryDialog, ConfirmDialog, SimpleConfirmDialog, SourceSelector, FileViewer, FindFilesDialog, HelpViewer, MkdirDialog, OverwriteConfirmDialog, PanelWidget, PluginViewer, ScpConnectDialog, ScpPasswordPromptDialog, SelectFilesDialog, ShellArea, SpinnerDialog, StatusBar, ViewerPluginMenu, ViewerSearchDialog, UserMenuDialog, UserMenuEditDialog, FileOpProgressDialog};
+use ui::{ArchivePasswordPromptDialog, CommandHistoryDialog, ConfirmDialog, SimpleConfirmDialog, SourceSelector, FileViewer, FindFilesDialog, HelpViewer, MkdirDialog, OverwriteConfirmDialog, PanelWidget, PluginViewer, ScpConnectDialog, ScpPasswordPromptDialog, SelectFilesDialog, ShellArea, ShellHistoryViewer, SpinnerDialog, StatusBar, ViewerPluginMenu, ViewerSearchDialog, UserMenuDialog, UserMenuEditDialog, FileOpProgressDialog};
 use ui::dialog::{archive_password_prompt_cursor_position, dialog_cursor_position, mkdir_cursor_position, find_files_pattern_cursor_position, find_files_content_cursor_position, find_files_path_cursor_position, viewer_search_text_cursor_position, viewer_search_hex_cursor_position, select_files_cursor_position, scp_connect_cursor_position, scp_password_prompt_cursor_position, user_menu_edit_cursor_position, PluginConnectDialog, plugin_connect_cursor_position};
 use input::get_help_text;
 
@@ -174,6 +174,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         frame.set_cursor_position((cx, cy));
                     }
                 }
+                Mode::ShellHistoryView { scroll } => {
+                    let viewer = ShellHistoryViewer::new(&app.cmd.output, *scroll);
+                    app.ui.viewer_height = ShellHistoryViewer::content_height(size);
+                    frame.render_widget(viewer, size);
+                }
                 Mode::Help { scroll } => {
                     // Full-screen help viewer
                     let help = HelpViewer::new(get_help_text(), *scroll, &app.theme);
@@ -286,10 +291,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         }
                     }
 
-                    // Render source selector if in source selector mode (overlay)
+                    // Render source selector if in source selector mode (overlay on target panel)
                     if let Mode::SourceSelector { target_panel, sources, selected } = &app.mode {
                         let dialog = SourceSelector::new(sources, *selected, target_panel, &app.theme);
-                        frame.render_widget(dialog, size);
+                        let panel_area = match target_panel {
+                            Side::Left => panel_chunks[0],
+                            Side::Right => panel_chunks[1],
+                        };
+                        frame.render_widget(dialog, panel_area);
                     }
 
                     // Render simple confirmation dialog (overlay)
@@ -857,6 +866,15 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         // Check if shell toggle is active (Ctrl+O) - interactive shell mode
         if matches!(app.mode, Mode::ShellVisible) {
 
+            // Windows 10's ConPTY doesn't relay shell output, so the
+            // interactive shell is unavailable.  Return to Normal mode.
+            if persistent_shell::is_windows_10_or_older() {
+                app.add_shell_output("Interactive shell (Ctrl+O) is not available on Windows 10 due to ConPTY limitations.".to_string());
+                app.mode = Mode::Normal;
+                needs_redraw = true;
+                continue;
+            }
+
             // Clear any stray content if not in command mode
             if !app.cmd.focused {
                 app.cmd.input.clear();
@@ -1083,6 +1101,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         if app.should_quit {
             // Save state before exiting
             app.save_state();
+            // Remove lock file before shell shutdown — on Windows,
+            // shutdown() calls process::exit() and never returns.
+            remove_lock_file();
             // Shut down the persistent shell
             if let Some(shell) = app.shell.take() {
                 shell.shutdown();

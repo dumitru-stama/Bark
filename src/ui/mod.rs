@@ -31,6 +31,7 @@ pub use help::HelpViewer;
 pub use panel::PanelWidget;
 pub use plugin_viewer::PluginViewer;
 pub use shell::ShellArea;
+pub use shell::ShellHistoryViewer;
 pub use status::StatusBar;
 pub use theme::Theme;
 pub use theme::ThemeConfig;

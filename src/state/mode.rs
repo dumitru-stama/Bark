@@ -178,6 +178,8 @@ pub enum Mode {
     },
     /// Shell visible (Ctrl+O)
     ShellVisible,
+    /// Shell history viewer (Ctrl+O when shell_history_mode or Win10)
+    ShellHistoryView { scroll: usize },
     /// Confirmation dialog for file operations
     Confirming {
         operation: FileOperation,
@@ -377,6 +379,8 @@ pub enum Mode {
         focus: usize,
         /// Error message (if any)
         error: Option<String>,
+        /// Original connection name when editing (None = new connection)
+        editing_name: Option<String>,
     },
     /// Overwrite confirmation dialog for file operations
     OverwriteConfirm {

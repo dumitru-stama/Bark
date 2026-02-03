@@ -22,6 +22,7 @@ A modern Norton Commander / Midnight Commander clone written in Rust with a focu
 - **File handlers** to open files with external applications based on patterns
 - **Favorites** for quick access to frequently used directories
 - **Attribute preservation** on copy/move (modification time and permissions) across local, remote, and archive sources
+- **Remote connection caching** - switching to a local folder preserves the remote session; reselecting the same connection restores instantly
 - **Cross-platform** support for Linux, macOS, and Windows
 
 ## Installation
@@ -132,7 +133,7 @@ Use `F5` to extract files to the other panel. Press `Esc` or navigate to `..` at
 | Key | Action |
 |-----|--------|
 | `:` | Enter command mode |
-| `Ctrl+O` | Toggle interactive shell mode |
+| `Ctrl+O` | Toggle interactive shell mode (or shell history viewer if configured) |
 | `Shift+Up/Down` | Resize shell area |
 | `Ctrl+Up/Down` | Scroll shell output by one line |
 | `Ctrl+PgUp/PgDn` | Scroll shell output by 10 lines |
@@ -143,6 +144,8 @@ Use `F5` to extract files to the other panel. Press `Esc` or navigate to `..` at
 Alt+Arrow variants are provided because `Ctrl+Up/Down` triggers Mission Control on macOS.
 
 Commands are executed with full PTY support. TUI programs (vim, htop, etc.) are auto-detected and given full terminal access. Command output is captured and displayed in the shell area with ANSI color support.
+
+**Shell History Viewer:** Set `general.shell_history_mode = true` in config to use a full-screen, scrollable, borderless view of command output history instead of the interactive PTY shell on Ctrl+O. This mode is also used automatically on Windows 10 where ConPTY is broken. Navigation: Up/Down/j/k (line), PgUp/PgDn (page), Home/End (oldest/newest), Esc or Ctrl+O to close.
 
 ### Insert into Command Line
 
@@ -175,7 +178,7 @@ Configuration is stored in a platform-specific directory:
 | Platform | Config path |
 |----------|-------------|
 | **Linux** | `~/.config/bark/config.toml` (respects `$XDG_CONFIG_HOME`) |
-| **macOS** | `~/Library/Application Support/bark/config.toml` |
+| **macOS** | `~/.config/bark/config.toml` (falls back to `~/Library/Application Support/bark/` for existing installs) |
 | **Windows** | `%APPDATA%\bark\config.toml` |
 
 ### Built-in Commands
@@ -229,6 +232,7 @@ run_executables = true
 autosave = false  # Auto-save config on exit
 shell = ""  # Override shell (e.g., "pwsh", "cmd.exe", "/bin/zsh"). Empty = auto-detect
 view_plugin_first = false  # true = F3 checks viewer plugins first; false = built-in viewer first
+shell_history_mode = false  # true = Ctrl+O shows scrollable history viewer instead of interactive shell
 remote_transfer_limit_mb = 512  # Confirm before remote transfers larger than this (0 = no limit)
 
 [display]
@@ -335,7 +339,7 @@ prefix = ">"
 
 ## Plugins
 
-Bark has an extensible plugin system. Plugins are **standalone executables** that communicate via JSON over stdin/stdout. They are loaded from the `plugins/` subdirectory inside the config directory (e.g., `~/.config/bark/plugins/` on Linux, `~/Library/Application Support/bark/plugins/` on macOS).
+Bark has an extensible plugin system. Plugins are **standalone executables** that communicate via JSON over stdin/stdout. They are loaded from the `plugins/` subdirectory inside the config directory (e.g., `~/.config/bark/plugins/` on Linux and macOS, `%APPDATA%\bark\plugins\` on Windows).
 
 ### Plugin Types
 
@@ -421,7 +425,7 @@ Connect to remote servers via SSH:
 3. Enter host, username, port, and optional path
 4. Authenticate with SSH key or password
 
-Connections can be saved for quick access.
+Connections can be saved for quick access. When you switch to a local folder while connected, the remote session is cached. Reselecting the same connection from the source selector restores it instantly without reconnecting. If the connection has dropped in the background, a fresh connection is made automatically.
 
 ### WebDAV
 
@@ -442,6 +446,7 @@ Connect to WebDAV servers (including NextCloud, ownCloud):
 - Uses native Windows APIs for file operations
 - Shell auto-detection: prefers PowerShell 7 (pwsh), then Windows PowerShell, then cmd.exe
 - Override with `general.shell` in config (e.g., `shell = "cmd.exe"` or `shell = "pwsh"`)
+- On Windows 10, Ctrl+O automatically uses the shell history viewer (ConPTY limitations prevent the interactive shell)
 - Build natively on Windows with the standard Rust MSVC toolchain (`x86_64-pc-windows-msvc`); mingw is only needed for cross-compiling from Linux
 
 ## Building

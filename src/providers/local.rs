@@ -106,16 +106,16 @@ impl PanelProvider for LocalProvider {
         &mut self,
         path: &str,
         modified: Option<std::time::SystemTime>,
-        permissions: u32,
+        _permissions: u32,
     ) -> ProviderResult<()> {
         let dest = Path::new(path);
         if let Some(mtime) = modified {
             let _ = filetime::set_file_mtime(dest, filetime::FileTime::from_system_time(mtime));
         }
         #[cfg(unix)]
-        if permissions != 0 {
+        if _permissions != 0 {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(dest, fs::Permissions::from_mode(permissions));
+            let _ = fs::set_permissions(dest, fs::Permissions::from_mode(_permissions));
         }
         Ok(())
     }

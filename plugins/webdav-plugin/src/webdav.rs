@@ -372,6 +372,8 @@ impl ProviderSession for WebdavProviderSession {
         let url = self.build_url(path);
 
         let response = self.request(reqwest::Method::PUT, &url)
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-Length", data.len().to_string())
             .body(data.to_vec())
             .send()
             .map_err(|e| ProviderError::Connection(format!("PUT failed: {}", e)))?;

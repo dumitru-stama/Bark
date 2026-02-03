@@ -117,7 +117,13 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         return;
     }
     if app.key_matches("shell_toggle", &key) {
-        app.mode = Mode::ShellVisible;
+        if app.config.general.shell_history_mode
+            || crate::persistent_shell::is_windows_10_or_older()
+        {
+            app.mode = Mode::ShellHistoryView { scroll: 0 };
+        } else {
+            app.mode = Mode::ShellVisible;
+        }
         return;
     }
 
@@ -615,7 +621,13 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
 
         // Ctrl+O still works in command mode
         KeyCode::Char('o') if ctrl => {
-            app.mode = Mode::ShellVisible;
+            if app.config.general.shell_history_mode
+                || crate::persistent_shell::is_windows_10_or_older()
+            {
+                app.mode = Mode::ShellHistoryView { scroll: 0 };
+            } else {
+                app.mode = Mode::ShellVisible;
+            }
         }
 
         // Clear line

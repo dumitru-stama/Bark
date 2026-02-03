@@ -1,14 +1,13 @@
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     let is_windows = target_os == "windows";
 
     if is_windows {
         println!("cargo:rustc-flags=-lpowrprof");
         println!("cargo:rustc-link-lib=shell32");
-        if target_env == "gnu" {
-            println!("cargo:rustc-link-lib=pthread");
-        }
+        // Windows uses native threading APIs (CreateThread), not pthreads.
+        // Linking pthread here for the gnu env caused a runtime dependency on
+        // libwinpthread-1.dll which is absent on most Windows installs.
     } else {
         println!("cargo:rustc-link-lib=pthread");
     }

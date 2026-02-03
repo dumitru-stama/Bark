@@ -135,6 +135,7 @@ fn handle_connect(json: &str) -> String {
 
     match plugin.connect(&config) {
         Ok(session) => {
+            let display_name = session.display_name();
             // Downcast to WebdavProviderSession
             // Since we control both sides, we know the type
             let webdav_session = unsafe {
@@ -146,7 +147,7 @@ fn handle_connect(json: &str) -> String {
             let mut guard = SESSION.lock().unwrap();
             *guard = Some(*webdav_session);
 
-            r#"{"success":true,"session_id":"default"}"#.to_string()
+            format!(r#"{{"success":true,"session_id":"default","display_name":"{}"}}"#, escape_json(&display_name))
         }
         Err(e) => format!(r#"{{"success":false,"error":"{}"}}"#, escape_json(&e.to_string())),
     }

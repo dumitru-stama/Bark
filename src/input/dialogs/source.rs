@@ -5,6 +5,17 @@ use crate::state::app::App;
 use crate::state::mode::Mode;
 
 pub fn handle_source_selector_mode(app: &mut App, key: KeyEvent) {
+    // Allow switching target panel while source selector is open
+    let is_left = app.key_matches("drive_left", &key) || app.key_matches("source_left", &key)
+        || app.key_matches("source_left_shift", &key) || app.key_matches("source_left_alt", &key);
+    let is_right = app.key_matches("drive_right", &key) || app.key_matches("source_right", &key)
+        || app.key_matches("source_right_shift", &key) || app.key_matches("source_right_alt", &key);
+    if is_left || is_right {
+        let target = if is_left { crate::state::Side::Left } else { crate::state::Side::Right };
+        app.show_source_selector(target);
+        return;
+    }
+
     let Mode::SourceSelector { target_panel, sources, selected } = &mut app.mode else {
         return;
     };

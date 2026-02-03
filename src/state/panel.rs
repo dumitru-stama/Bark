@@ -65,6 +65,13 @@ pub struct SavedPanelState {
     pub scroll_offset: usize,
 }
 
+/// Cached remote provider (preserved when switching to local)
+pub struct CachedRemote {
+    provider: Box<dyn PanelProvider>,
+    path: PathBuf,
+    connection_key: String,
+}
+
 /// Info needed to return to a previous provider (e.g., when exiting an archive)
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -116,6 +123,10 @@ pub struct Panel {
     provider: Box<dyn PanelProvider>,
     /// Info about the parent provider (set when entering an archive)
     parent_provider: Option<ParentProviderInfo>,
+    /// Cached remote provider (preserved when switching to local)
+    cached_remote: Option<CachedRemote>,
+    /// Connection key for the current remote provider (used for cache matching)
+    connection_key: Option<String>,
 }
 
 impl std::fmt::Debug for Panel {
@@ -150,6 +161,8 @@ impl Panel {
             saved_state: None,
             provider: Box::new(LocalProvider::new()),
             parent_provider: None,
+            cached_remote: None,
+            connection_key: None,
         };
         panel.refresh();
         panel
@@ -190,19 +203,60 @@ impl Panel {
     }
 
     /// Set a provider for this panel (local or remote)
-    pub fn set_provider(&mut self, provider: Box<dyn PanelProvider>, initial_path: &str) {
+    pub fn set_provider(&mut self, provider: Box<dyn PanelProvider>, initial_path: &str, connection_key: Option<String>) {
+        // Drop cached remote since we're connecting to something new
+        if let Some(mut cached) = self.cached_remote.take() {
+            cached.provider.disconnect();
+        }
         self.provider.disconnect();
         self.provider = provider;
+        self.connection_key = connection_key;
         self.path = PathBuf::from(initial_path);
         self.refresh();
     }
 
     /// Switch back to local filesystem
+    /// If the current provider is remote, cache it for potential restoration later.
     pub fn set_local_provider(&mut self, path: PathBuf) {
-        self.provider.disconnect();
-        self.provider = Box::new(LocalProvider::new());
-        self.path = path;
+        if !self.provider.is_local() {
+            // Cache the remote provider instead of disconnecting
+            let old_provider = std::mem::replace(&mut self.provider, Box::new(LocalProvider::new()));
+            let old_path = std::mem::replace(&mut self.path, path);
+            let key = self.connection_key.take().unwrap_or_default();
+            // Drop any previously cached remote
+            if let Some(mut prev) = self.cached_remote.take() {
+                prev.provider.disconnect();
+            }
+            self.cached_remote = Some(CachedRemote {
+                provider: old_provider,
+                path: old_path,
+                connection_key: key,
+            });
+        } else {
+            self.provider = Box::new(LocalProvider::new());
+            self.path = path;
+        }
         self.refresh();
+    }
+
+    /// Try to restore a cached remote connection by key.
+    /// Returns true if the cache matched and was restored.
+    pub fn restore_cached_remote(&mut self, key: &str) -> bool {
+        let matches = self.cached_remote.as_ref()
+            .is_some_and(|c| c.connection_key == key && c.provider.is_connected());
+        if matches {
+            let cached = self.cached_remote.take().unwrap();
+            self.provider.disconnect();
+            self.provider = cached.provider;
+            self.connection_key = Some(cached.connection_key);
+            self.path = cached.path;
+            self.cursor = 0;
+            self.scroll_offset = 0;
+            self.refresh();
+            true
+        } else {
+            false
+        }
     }
 
     /// Get provider info for display

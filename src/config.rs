@@ -250,6 +250,9 @@ pub struct GeneralConfig {
     /// Max size (MB) for remote transfers before confirmation prompt (0 = no limit)
     #[serde(default = "default_remote_transfer_limit_mb")]
     pub remote_transfer_limit_mb: u64,
+    /// Use shell history viewer instead of interactive PTY shell on Ctrl+O
+    #[serde(default)]
+    pub shell_history_mode: bool,
 }
 
 fn default_remote_transfer_limit_mb() -> u64 {
@@ -468,6 +471,7 @@ impl Default for GeneralConfig {
             last_right_view: None,
             view_plugin_first: false,
             remote_transfer_limit_mb: 512,
+            shell_history_mode: false,
         }
     }
 }
@@ -517,8 +521,21 @@ pub fn config_dir() -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        // macOS: ~/Library/Application Support/bark
-        std::env::var("HOME").ok().map(|p| PathBuf::from(p).join("Library/Application Support/bark"))
+        // macOS: prefer ~/.config/bark (consistent with other CLI tools like fish, nvim, etc.)
+        // Fall back to ~/Library/Application Support/bark for existing installs
+        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        if let Some(ref h) = home {
+            let xdg_path = h.join(".config/bark");
+            let legacy_path = h.join("Library/Application Support/bark");
+            if xdg_path.exists() {
+                return Some(xdg_path);
+            }
+            if legacy_path.exists() {
+                return Some(legacy_path);
+            }
+        }
+        // New installs: default to ~/.config/bark
+        home.map(|h| h.join(".config/bark"))
     }
 
     #[cfg(target_os = "windows")]

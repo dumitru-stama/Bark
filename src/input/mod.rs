@@ -42,6 +42,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::Editing { .. } => {} // Handled in main loop
         Mode::RunningCommand { .. } => {} // Handled in main loop
         Mode::ShellVisible => dialogs::handle_shell_mode(app, key),
+        Mode::ShellHistoryView { .. } => {
+            let height = app.ui.viewer_height;
+            dialogs::handle_shell_history_view(app, key, height);
+        }
         Mode::Confirming { .. } => dialogs::handle_confirming_mode(app, key),
         Mode::SimpleConfirm { .. } => dialogs::handle_simple_confirm_mode(app, key),
         Mode::ScpPasswordPrompt { .. } => dialogs::handle_scp_password_prompt_mode(app, key),
