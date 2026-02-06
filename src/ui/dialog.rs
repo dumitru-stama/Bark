@@ -19,6 +19,7 @@ pub struct ConfirmDialog<'a> {
     dest_input: &'a str,
     focus: usize,
     input_selected: bool,
+    apply_all: bool,
     theme: &'a Theme,
 }
 
@@ -30,6 +31,7 @@ impl<'a> ConfirmDialog<'a> {
         _cursor_pos: usize,
         focus: usize,
         input_selected: bool,
+        apply_all: bool,
         theme: &'a Theme,
     ) -> Self {
         Self {
@@ -38,6 +40,7 @@ impl<'a> ConfirmDialog<'a> {
             dest_input,
             focus,
             input_selected,
+            apply_all,
             theme,
         }
     }
@@ -46,10 +49,18 @@ impl<'a> ConfirmDialog<'a> {
 impl Widget for ConfirmDialog<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let is_delete = matches!(self.operation, FileOperation::Delete);
+        // Show checkbox when deleting a single directory
+        let show_checkbox = is_delete
+            && self.sources.len() == 1
+            && self.sources[0].is_dir();
 
-        // Dialog dimensions (smaller for delete)
+        // Dialog dimensions (smaller for delete, taller with checkbox)
         let dialog_width = 60.min(area.width.saturating_sub(4));
-        let dialog_height = if is_delete { 8 } else { 10 };
+        let dialog_height = if is_delete {
+            if show_checkbox { 10 } else { 8 }
+        } else {
+            10
+        };
 
         if area.width < 20 || area.height < dialog_height {
             return;
@@ -144,17 +155,30 @@ impl Widget for ConfirmDialog<'_> {
             let truncated_info: String = file_info.chars().take(content_width).collect();
             buf.set_string(content_x, dialog_area.y + 4, &truncated_info, label_style);
 
-            // Buttons (line 6)
-            let button_y = dialog_area.y + 6;
+            // Checkbox row (only for single directory) and buttons shift down
+            let button_offset = if show_checkbox { 2 } else { 0 };
+
+            if show_checkbox {
+                // Checkbox (focus 1 when shown)
+                let checkbox_y = dialog_area.y + 6;
+                let check_char = if self.apply_all { 'x' } else { ' ' };
+                let checkbox_text = format!("[{}] Apply for all", check_char);
+                let checkbox_style = if self.focus == 1 { button_style_focused } else { label_style };
+                buf.set_string(content_x, checkbox_y, &checkbox_text, checkbox_style);
+            }
+
+            // Buttons — when checkbox is shown: Delete=focus 2, Cancel=focus 3
+            //           otherwise:              Delete=focus 1, Cancel=focus 2
+            let button_y = dialog_area.y + 6 + button_offset;
             let ok_text = "[ Delete ]";
             let cancel_text = "[ Cancel ]";
 
             let total_button_width = ok_text.len() + 4 + cancel_text.len();
             let button_start_x = dialog_area.x + (dialog_area.width.saturating_sub(total_button_width as u16)) / 2;
 
-            // Delete button style based on focus
-            let delete_style = if self.focus == 1 { delete_button_focused } else { delete_button_unfocused };
-            let cancel_style = if self.focus == 2 { button_style_focused } else { button_style_unfocused };
+            let (del_focus, cancel_focus) = if show_checkbox { (2, 3) } else { (1, 2) };
+            let delete_style = if self.focus == del_focus { delete_button_focused } else { delete_button_unfocused };
+            let cancel_style = if self.focus == cancel_focus { button_style_focused } else { button_style_unfocused };
 
             buf.set_string(button_start_x, button_y, ok_text, delete_style);
             buf.set_string(button_start_x + ok_text.len() as u16 + 4, button_y, cancel_text, cancel_style);
@@ -217,6 +241,135 @@ impl Widget for ConfirmDialog<'_> {
             let help_x = dialog_area.x + (dialog_area.width.saturating_sub(help_text.len() as u16)) / 2;
             buf.set_string(help_x, dialog_area.y + 8, help_text, help_style);
         }
+    }
+}
+
+/// Iterative delete confirmation dialog (per-item in a directory)
+pub struct DeleteIterativeDialog<'a> {
+    items: &'a [PathBuf],
+    current: usize,
+    apply_all: bool,
+    focus: usize,
+    theme: &'a Theme,
+}
+
+impl<'a> DeleteIterativeDialog<'a> {
+    pub fn new(
+        items: &'a [PathBuf],
+        current: usize,
+        apply_all: bool,
+        focus: usize,
+        theme: &'a Theme,
+    ) -> Self {
+        Self { items, current, apply_all, focus, theme }
+    }
+}
+
+impl Widget for DeleteIterativeDialog<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let dialog_width = 60.min(area.width.saturating_sub(4));
+        let dialog_height: u16 = 10;
+
+        if area.width < 20 || area.height < dialog_height {
+            return;
+        }
+
+        let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+
+        let dialog_area = Rect { x, y, width: dialog_width, height: dialog_height };
+
+        let bg_color = self.theme.dialog_delete_bg;
+        let border_color = self.theme.dialog_delete_border;
+
+        let border_style = Style::default().fg(border_color);
+        let title_style = Style::default().bg(bg_color).fg(self.theme.dialog_title).add_modifier(Modifier::BOLD);
+        let label_style = Style::default().bg(bg_color).fg(self.theme.dialog_text);
+        let warning_style = Style::default().bg(bg_color).fg(self.theme.dialog_warning).add_modifier(Modifier::BOLD);
+        let help_style = Style::default().bg(bg_color).fg(self.theme.dialog_help);
+        let button_style_focused = Style::default().fg(self.theme.dialog_button_focused_fg).bg(self.theme.dialog_button_focused_bg).add_modifier(Modifier::BOLD);
+        let button_style_unfocused = Style::default().fg(self.theme.dialog_button_unfocused).bg(bg_color);
+        let delete_button_focused = Style::default().fg(self.theme.dialog_delete_button_focused_fg).bg(self.theme.dialog_delete_button_focused_bg).add_modifier(Modifier::BOLD);
+        let delete_button_unfocused = Style::default().fg(self.theme.dialog_button_unfocused).bg(bg_color);
+
+        // Draw background
+        let bg_style = Style::default().bg(bg_color);
+        for row in dialog_area.y..dialog_area.y + dialog_area.height {
+            for col in dialog_area.x..dialog_area.x + dialog_area.width {
+                buf[(col, row)].set_char(' ').set_style(bg_style);
+            }
+        }
+
+        // Draw border
+        buf[(dialog_area.x, dialog_area.y)].set_char('┌').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y)].set_char('┐').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y)].set_char('─').set_style(border_style);
+        }
+        buf[(dialog_area.x, dialog_area.y + dialog_area.height - 1)].set_char('└').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y + dialog_area.height - 1)].set_char('┘').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y + dialog_area.height - 1)].set_char('─').set_style(border_style);
+        }
+        for row in dialog_area.y + 1..dialog_area.y + dialog_area.height - 1 {
+            buf[(dialog_area.x, row)].set_char('│').set_style(border_style);
+            buf[(dialog_area.x + dialog_area.width - 1, row)].set_char('│').set_style(border_style);
+        }
+
+        // Title
+        let title = " Delete ";
+        let title_x = dialog_area.x + (dialog_area.width.saturating_sub(title.len() as u16)) / 2;
+        buf.set_string(title_x, dialog_area.y, title, title_style);
+
+        let content_x = dialog_area.x + 2;
+        let content_width = dialog_area.width.saturating_sub(4) as usize;
+
+        // Item name and progress counter (line 2)
+        let item = &self.items[self.current];
+        let name = item.file_name().unwrap_or_default().to_string_lossy();
+        let is_dir = item.is_dir();
+        let type_indicator = if is_dir { "/" } else { "" };
+        let progress = format!("({}/{})", self.current + 1, self.items.len());
+
+        let delete_label = format!("Delete \"{}{}\"?", name, type_indicator);
+        let max_label_width = content_width.saturating_sub(progress.len() + 1);
+        let truncated_label: String = delete_label.chars().take(max_label_width).collect();
+        buf.set_string(content_x, dialog_area.y + 2, &truncated_label, warning_style);
+
+        // Progress counter (right-aligned on line 2)
+        let progress_x = dialog_area.x + dialog_area.width - 2 - progress.len() as u16;
+        buf.set_string(progress_x, dialog_area.y + 2, &progress, label_style);
+
+        // Checkbox (line 4) — focus 0
+        let check_char = if self.apply_all { 'x' } else { ' ' };
+        let checkbox_text = format!("[{}] Apply for all", check_char);
+        let checkbox_style = if self.focus == 0 { button_style_focused } else { label_style };
+        buf.set_string(content_x, dialog_area.y + 4, &checkbox_text, checkbox_style);
+
+        // Buttons (line 6): Delete=focus 1, Skip=focus 2, Cancel=focus 3
+        let button_y = dialog_area.y + 6;
+        let del_text = "[ Delete ]";
+        let skip_text = "[ Skip ]";
+        let cancel_text = "[ Cancel ]";
+
+        let total_button_width = del_text.len() + 3 + skip_text.len() + 3 + cancel_text.len();
+        let button_start_x = dialog_area.x + (dialog_area.width.saturating_sub(total_button_width as u16)) / 2;
+
+        let del_style = if self.focus == 1 { delete_button_focused } else { delete_button_unfocused };
+        let skip_style = if self.focus == 2 { button_style_focused } else { button_style_unfocused };
+        let cancel_style = if self.focus == 3 { button_style_focused } else { button_style_unfocused };
+
+        let mut bx = button_start_x;
+        buf.set_string(bx, button_y, del_text, del_style);
+        bx += del_text.len() as u16 + 3;
+        buf.set_string(bx, button_y, skip_text, skip_style);
+        bx += skip_text.len() as u16 + 3;
+        buf.set_string(bx, button_y, cancel_text, cancel_style);
+
+        // Help text (line 8)
+        let help_text = "Tab=Switch  Enter=Select  Esc=Cancel";
+        let help_x = dialog_area.x + (dialog_area.width.saturating_sub(help_text.len() as u16)) / 2;
+        buf.set_string(help_x, dialog_area.y + 8, help_text, help_style);
     }
 }
 
@@ -2764,5 +2917,387 @@ impl Widget for OverwriteConfirmDialog<'_> {
             let help_x = dialog_area.x + (dialog_area.width.saturating_sub(help.len() as u16)) / 2;
             buf.set_string(help_x, dialog_area.y + dialog_area.height - 1, help, help_style);
         }
+    }
+}
+
+/// Permissions editing dialog (Unix only)
+#[cfg(not(windows))]
+pub struct EditPermissionsDialog<'a> {
+    paths: &'a [PathBuf],
+    owner: &'a str,
+    group: &'a str,
+    perms: [bool; 9],
+    apply_recursive: bool,
+    has_dirs: bool,
+    focus: usize,
+    theme: &'a Theme,
+}
+
+#[cfg(not(windows))]
+impl<'a> EditPermissionsDialog<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        paths: &'a [PathBuf],
+        owner: &'a str,
+        group: &'a str,
+        perms: [bool; 9],
+        apply_recursive: bool,
+        has_dirs: bool,
+        focus: usize,
+        theme: &'a Theme,
+    ) -> Self {
+        Self { paths, owner, group, perms, apply_recursive, has_dirs, focus, theme }
+    }
+}
+
+#[cfg(not(windows))]
+impl Widget for EditPermissionsDialog<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let dialog_width: u16 = 42;
+        let dialog_height: u16 = if self.has_dirs { 13 } else { 11 };
+
+        if area.width < 30 || area.height < dialog_height {
+            return;
+        }
+
+        let dialog_area = Rect {
+            x: area.x + (area.width.saturating_sub(dialog_width)) / 2,
+            y: area.y + (area.height.saturating_sub(dialog_height)) / 2,
+            width: dialog_width.min(area.width.saturating_sub(4)),
+            height: dialog_height,
+        };
+
+        let bg_color = self.theme.dialog_move_bg;
+        let border_color = self.theme.dialog_move_border;
+
+        let border_style = Style::default().fg(border_color);
+        let title_style = Style::default().bg(bg_color).fg(self.theme.dialog_title).add_modifier(Modifier::BOLD);
+        let label_style = Style::default().bg(bg_color).fg(self.theme.dialog_text);
+        let checkbox_focused = Style::default().bg(self.theme.dialog_input_focused_bg).fg(self.theme.dialog_input_focused_fg);
+        let checkbox_unfocused = Style::default().bg(bg_color).fg(self.theme.dialog_text);
+        let button_focused = Style::default().fg(self.theme.dialog_button_focused_fg).bg(self.theme.dialog_button_focused_bg).add_modifier(Modifier::BOLD);
+        let button_unfocused = Style::default().fg(self.theme.dialog_button_unfocused).bg(bg_color);
+        let help_style = Style::default().bg(bg_color).fg(self.theme.dialog_help);
+        let bg_style = Style::default().bg(bg_color);
+
+        // Background
+        for row in dialog_area.y..dialog_area.y + dialog_area.height {
+            for col in dialog_area.x..dialog_area.x + dialog_area.width {
+                buf[(col, row)].set_char(' ').set_style(bg_style);
+            }
+        }
+
+        // Border
+        buf[(dialog_area.x, dialog_area.y)].set_char('┌').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y)].set_char('┐').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y)].set_char('─').set_style(border_style);
+        }
+        buf[(dialog_area.x, dialog_area.y + dialog_area.height - 1)].set_char('└').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y + dialog_area.height - 1)].set_char('┘').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y + dialog_area.height - 1)].set_char('─').set_style(border_style);
+        }
+        for row in dialog_area.y + 1..dialog_area.y + dialog_area.height - 1 {
+            buf[(dialog_area.x, row)].set_char('│').set_style(border_style);
+            buf[(dialog_area.x + dialog_area.width - 1, row)].set_char('│').set_style(border_style);
+        }
+
+        // Title
+        let title = " Permissions ";
+        let title_x = dialog_area.x + (dialog_area.width.saturating_sub(title.len() as u16)) / 2;
+        buf.set_string(title_x, dialog_area.y, title, title_style);
+
+        let cx = dialog_area.x + 2;
+        let content_width = dialog_area.width.saturating_sub(4) as usize;
+
+        // File info (line 2)
+        let first_name = self.paths.first()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let info = format!("{} ({}/{})", first_name, self.owner, self.group);
+        let display_info = if info.len() > content_width {
+            format!("{}…", &info[..content_width.saturating_sub(1)])
+        } else {
+            info
+        };
+        buf.set_string(cx, dialog_area.y + 2, &display_info, label_style);
+
+        // Extra files count
+        if self.paths.len() > 1 {
+            let extra = format!("(+ {} more files)", self.paths.len() - 1);
+            buf.set_string(cx, dialog_area.y + 3, &extra, label_style);
+        }
+
+        // Permission rows start at y+4
+        let perm_y = dialog_area.y + 4;
+        let labels = ["Owner:", "Group:", "Other:"];
+        let bits = ["r", "w", "x"];
+
+        for (row_idx, row_label) in labels.iter().enumerate() {
+            let y = perm_y + row_idx as u16;
+            buf.set_string(cx, y, row_label, label_style);
+
+            for col_idx in 0..3 {
+                let perm_idx = row_idx * 3 + col_idx;
+                let checked = self.perms[perm_idx];
+                let focused = self.focus == perm_idx;
+                let style = if focused { checkbox_focused } else { checkbox_unfocused };
+                let checkbox = if checked { "[x]" } else { "[ ]" };
+                let text = format!("{}{}", checkbox, bits[col_idx]);
+                let x = cx + 9 + (col_idx as u16 * 6);
+                buf.set_string(x, y, &text, style);
+            }
+        }
+
+        // Recursive checkbox (only if has_dirs)
+        let mut next_y = perm_y + 2; // last perm row (Other)
+        if self.has_dirs {
+            next_y += 2; // 1 blank line after Other row
+            let focused = self.focus == 9;
+            let style = if focused { checkbox_focused } else { checkbox_unfocused };
+            let checkbox = if self.apply_recursive { "[x]" } else { "[ ]" };
+            buf.set_string(cx, next_y, &format!("{} Apply recursively", checkbox), style);
+        }
+
+        // Buttons (1 blank line after last content)
+        let ok_focus = if self.has_dirs { 10 } else { 9 };
+        let cancel_focus = ok_focus + 1;
+        let button_y = next_y + 2;
+        let ok_style = if self.focus == ok_focus { button_focused } else { button_unfocused };
+        let cancel_style = if self.focus == cancel_focus { button_focused } else { button_unfocused };
+        let btn_x = dialog_area.x + (dialog_area.width.saturating_sub(20)) / 2;
+        buf.set_string(btn_x, button_y, "[ OK ]", ok_style);
+        buf.set_string(btn_x + 10, button_y, "[ Cancel ]", cancel_style);
+
+        // Help text on bottom border
+        let help = " Tab=Switch Space=Toggle ";
+        let help_x = dialog_area.x + (dialog_area.width.saturating_sub(help.len() as u16)) / 2;
+        buf.set_string(help_x, dialog_area.y + dialog_area.height - 1, help, help_style);
+    }
+}
+
+/// Owner/Group editing dialog (Unix only)
+#[cfg(not(windows))]
+pub struct EditOwnerDialog<'a> {
+    paths: &'a [PathBuf],
+    current_owner: &'a str,
+    current_group: &'a str,
+    users: &'a [String],
+    groups: &'a [String],
+    user_selected: usize,
+    user_scroll: usize,
+    group_selected: usize,
+    group_scroll: usize,
+    apply_recursive: bool,
+    has_dirs: bool,
+    focus: usize,
+    theme: &'a Theme,
+}
+
+#[cfg(not(windows))]
+impl<'a> EditOwnerDialog<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        paths: &'a [PathBuf],
+        current_owner: &'a str,
+        current_group: &'a str,
+        users: &'a [String],
+        groups: &'a [String],
+        user_selected: usize,
+        user_scroll: usize,
+        group_selected: usize,
+        group_scroll: usize,
+        apply_recursive: bool,
+        has_dirs: bool,
+        focus: usize,
+        theme: &'a Theme,
+    ) -> Self {
+        Self {
+            paths, current_owner, current_group,
+            users, groups,
+            user_selected, user_scroll,
+            group_selected, group_scroll,
+            apply_recursive, has_dirs, focus, theme,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+impl Widget for EditOwnerDialog<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let list_height: u16 = 6;
+        let dialog_width: u16 = 50;
+        let dialog_height: u16 = if self.has_dirs { 10 + list_height } else { 8 + list_height };
+
+        if area.width < 40 || area.height < dialog_height {
+            return;
+        }
+
+        let dialog_area = Rect {
+            x: area.x + (area.width.saturating_sub(dialog_width)) / 2,
+            y: area.y + (area.height.saturating_sub(dialog_height)) / 2,
+            width: dialog_width.min(area.width.saturating_sub(4)),
+            height: dialog_height,
+        };
+
+        let bg_color = self.theme.dialog_move_bg;
+        let border_color = self.theme.dialog_move_border;
+
+        let border_style = Style::default().fg(border_color);
+        let title_style = Style::default().bg(bg_color).fg(self.theme.dialog_title).add_modifier(Modifier::BOLD);
+        let label_style = Style::default().bg(bg_color).fg(self.theme.dialog_text);
+        let list_focused = Style::default().bg(self.theme.dialog_input_focused_bg).fg(self.theme.dialog_input_focused_fg);
+        let list_selected = Style::default().bg(self.theme.dialog_button_focused_bg).fg(self.theme.dialog_button_focused_fg).add_modifier(Modifier::BOLD);
+        let list_unfocused = Style::default().bg(bg_color).fg(self.theme.dialog_text);
+        let checkbox_focused = Style::default().bg(self.theme.dialog_input_focused_bg).fg(self.theme.dialog_input_focused_fg);
+        let checkbox_unfocused = Style::default().bg(bg_color).fg(self.theme.dialog_text);
+        let button_focused = Style::default().fg(self.theme.dialog_button_focused_fg).bg(self.theme.dialog_button_focused_bg).add_modifier(Modifier::BOLD);
+        let button_unfocused = Style::default().fg(self.theme.dialog_button_unfocused).bg(bg_color);
+        let help_style = Style::default().bg(bg_color).fg(self.theme.dialog_help);
+        let bg_style = Style::default().bg(bg_color);
+
+        // Background
+        for row in dialog_area.y..dialog_area.y + dialog_area.height {
+            for col in dialog_area.x..dialog_area.x + dialog_area.width {
+                buf[(col, row)].set_char(' ').set_style(bg_style);
+            }
+        }
+
+        // Border
+        buf[(dialog_area.x, dialog_area.y)].set_char('┌').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y)].set_char('┐').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y)].set_char('─').set_style(border_style);
+        }
+        buf[(dialog_area.x, dialog_area.y + dialog_area.height - 1)].set_char('└').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y + dialog_area.height - 1)].set_char('┘').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y + dialog_area.height - 1)].set_char('─').set_style(border_style);
+        }
+        for row in dialog_area.y + 1..dialog_area.y + dialog_area.height - 1 {
+            buf[(dialog_area.x, row)].set_char('│').set_style(border_style);
+            buf[(dialog_area.x + dialog_area.width - 1, row)].set_char('│').set_style(border_style);
+        }
+
+        // Title
+        let title = " Owner / Group ";
+        let title_x = dialog_area.x + (dialog_area.width.saturating_sub(title.len() as u16)) / 2;
+        buf.set_string(title_x, dialog_area.y, title, title_style);
+
+        let cx = dialog_area.x + 2;
+        let content_width = dialog_area.width.saturating_sub(4) as usize;
+
+        // File info (line 2)
+        let first_name = self.paths.first()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let info = format!("{} ({}/{})", first_name, self.current_owner, self.current_group);
+        let display_info = if info.len() > content_width {
+            format!("{}…", &info[..content_width.saturating_sub(1)])
+        } else {
+            info
+        };
+        buf.set_string(cx, dialog_area.y + 2, &display_info, label_style);
+
+        // Extra files count
+        let mut y = dialog_area.y + 3;
+        if self.paths.len() > 1 {
+            let extra = format!("(+ {} more files)", self.paths.len() - 1);
+            buf.set_string(cx, y, &extra, label_style);
+            y += 1;
+        }
+
+        // Column headers
+        let col1_x = cx;
+        let col2_x = cx + (content_width as u16) / 2;
+        let col1_width = ((content_width as u16) / 2).saturating_sub(1) as usize;
+        let col2_width = col1_width;
+        buf.set_string(col1_x, y, "Owner:", label_style);
+        buf.set_string(col2_x, y, "Group:", label_style);
+        y += 1;
+
+        // Render user list
+        for i in 0..list_height as usize {
+            let idx = self.user_scroll + i;
+            let row_y = y + i as u16;
+            if idx < self.users.len() {
+                let name = &self.users[idx];
+                let is_selected = idx == self.user_selected;
+                let style = if is_selected && self.focus == 0 {
+                    list_selected
+                } else if is_selected {
+                    list_focused
+                } else if self.focus == 0 {
+                    list_focused.bg(bg_color)
+                } else {
+                    list_unfocused
+                };
+                let marker = if is_selected { "▸" } else { " " };
+                let display = format!("{}{}", marker, name);
+                let display = if display.len() > col1_width {
+                    format!("{}…", &display[..col1_width.saturating_sub(1)])
+                } else {
+                    format!("{:<width$}", display, width = col1_width)
+                };
+                buf.set_string(col1_x, row_y, &display, style);
+            }
+        }
+
+        // Render group list
+        for i in 0..list_height as usize {
+            let idx = self.group_scroll + i;
+            let row_y = y + i as u16;
+            if idx < self.groups.len() {
+                let name = &self.groups[idx];
+                let is_selected = idx == self.group_selected;
+                let style = if is_selected && self.focus == 1 {
+                    list_selected
+                } else if is_selected {
+                    list_focused
+                } else if self.focus == 1 {
+                    list_focused.bg(bg_color)
+                } else {
+                    list_unfocused
+                };
+                let marker = if is_selected { "▸" } else { " " };
+                let display = format!("{}{}", marker, name);
+                let display = if display.len() > col2_width {
+                    format!("{}…", &display[..col2_width.saturating_sub(1)])
+                } else {
+                    format!("{:<width$}", display, width = col2_width)
+                };
+                buf.set_string(col2_x, row_y, &display, style);
+            }
+        }
+
+        y += list_height;
+
+        // Recursive checkbox (only if has_dirs)
+        if self.has_dirs {
+            y += 1; // 1 blank line after lists
+            let focused = self.focus == 2;
+            let style = if focused { checkbox_focused } else { checkbox_unfocused };
+            let checkbox = if self.apply_recursive { "[x]" } else { "[ ]" };
+            buf.set_string(cx, y, &format!("{} Apply recursively", checkbox), style);
+            y += 1;
+        }
+
+        // Buttons (1 blank line after last content)
+        let ok_focus = if self.has_dirs { 3 } else { 2 };
+        let cancel_focus = ok_focus + 1;
+        let button_y = y + 1;
+        let ok_style = if self.focus == ok_focus { button_focused } else { button_unfocused };
+        let cancel_style = if self.focus == cancel_focus { button_focused } else { button_unfocused };
+        let btn_x = dialog_area.x + (dialog_area.width.saturating_sub(20)) / 2;
+        buf.set_string(btn_x, button_y, "[ OK ]", ok_style);
+        buf.set_string(btn_x + 10, button_y, "[ Cancel ]", cancel_style);
+
+        // Help text on bottom border
+        let help = " Tab=Switch ↑↓=Select ";
+        let help_x = dialog_area.x + (dialog_area.width.saturating_sub(help.len() as u16)) / 2;
+        buf.set_string(help_x, dialog_area.y + dialog_area.height - 1, help, help_style);
     }
 }

@@ -113,7 +113,10 @@ pub fn handle_source_selector_mode(app: &mut App, key: KeyEvent) {
             if let Some(idx) = sources.iter().position(|s| {
                 matches!(s, PanelSource::Drive { letter: l, .. } if l == &drive_str)
             }) {
-                *selected = idx;
+                let target = *target_panel;
+                let source = sources[idx].clone();
+                app.mode = Mode::Normal;
+                app.select_source(target, &source);
             }
         }
 

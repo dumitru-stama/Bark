@@ -199,6 +199,64 @@ fn get_username(uid: u32) -> String {
     }
 }
 
+/// Enumerate all system users, returning sorted unique names
+#[cfg(unix)]
+pub fn enumerate_users() -> Vec<String> {
+    use std::collections::BTreeSet;
+    use std::ffi::CStr;
+
+    let mut names = BTreeSet::new();
+
+    // SAFETY: setpwent/getpwent/endpwent are standard POSIX functions
+    unsafe {
+        libc::setpwent();
+        loop {
+            let pw = libc::getpwent();
+            if pw.is_null() {
+                break;
+            }
+            let name = (*pw).pw_name;
+            if !name.is_null() {
+                if let Ok(s) = CStr::from_ptr(name).to_str() {
+                    names.insert(s.to_string());
+                }
+            }
+        }
+        libc::endpwent();
+    }
+
+    names.into_iter().collect()
+}
+
+/// Enumerate all system groups, returning sorted unique names
+#[cfg(unix)]
+pub fn enumerate_groups() -> Vec<String> {
+    use std::collections::BTreeSet;
+    use std::ffi::CStr;
+
+    let mut names = BTreeSet::new();
+
+    // SAFETY: setgrent/getgrent/endgrent are standard POSIX functions
+    unsafe {
+        libc::setgrent();
+        loop {
+            let gr = libc::getgrent();
+            if gr.is_null() {
+                break;
+            }
+            let name = (*gr).gr_name;
+            if !name.is_null() {
+                if let Ok(s) = CStr::from_ptr(name).to_str() {
+                    names.insert(s.to_string());
+                }
+            }
+        }
+        libc::endgrent();
+    }
+
+    names.into_iter().collect()
+}
+
 /// Get group name from gid (Unix only)
 #[cfg(unix)]
 fn get_groupname(gid: u32) -> String {

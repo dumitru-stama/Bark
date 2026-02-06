@@ -297,6 +297,13 @@ pub struct EditorConfig {
     pub command: String,
     /// External viewer command (empty = use built-in)
     pub viewer: String,
+    /// External hex editor command (used by HexEditor plugin)
+    #[serde(default = "default_hex_editor")]
+    pub hex_editor: String,
+}
+
+fn default_hex_editor() -> String {
+    "jinx".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -411,6 +418,12 @@ pub fn default_keybinding(action: &str) -> &'static str {
         // Page navigation (vim-style)
         "page_up_vim" => "Ctrl+B",
         "page_down_vim" => "Ctrl+F",
+
+        // Permissions (Unix only)
+        "permissions" => "Ctrl+X",
+
+        // Owner/Group (Unix only)
+        "chown" => "Ctrl+G",
 
         // Viewer
         "viewer_save" => "Ctrl+S",
@@ -1099,6 +1112,7 @@ impl Config {
         if let Some(editor) = doc.get_mut("editor").and_then(|v| v.as_table_mut()) {
             editor["command"] = value(&self.editor.command);
             editor["viewer"] = value(&self.editor.viewer);
+            editor["hex_editor"] = value(&self.editor.hex_editor);
         }
 
         // Update [confirmations] section

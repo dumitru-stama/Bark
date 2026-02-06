@@ -79,6 +79,14 @@ pub enum TaskResult {
         /// Source file name for retry (extension-mode plugins)
         source_name: Option<String>,
     },
+    /// Shell command completed (Windows async execution)
+    #[allow(dead_code)]
+    CommandCompleted {
+        stdout: String,
+        stderr: String,
+        command: String,
+        cwd: PathBuf,
+    },
     /// File operation completed
     FileOpCompleted(FileOpResult),
     /// Remote file operation completed (providers need to be restored to panels)
@@ -311,6 +319,87 @@ impl BackgroundTask {
                         password_required: is_pw,
                         source_path: Some(sp_clone),
                         source_name: Some(sn_clone),
+                    });
+                }
+            }
+        });
+
+        BackgroundTask {
+            receiver: rx,
+            progress_rx: None,
+            _handle: handle,
+        }
+    }
+
+    /// Spawn a background shell command (Windows: runs .output() in a thread)
+    #[allow(dead_code)]
+    pub fn run_command(
+        shell: String,
+        flag: String,
+        command: String,
+        cwd: PathBuf,
+        child_holder: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    ) -> Self {
+        let (tx, rx) = channel::<TaskResult>();
+        let cmd_clone = command.clone();
+        let cwd_clone = cwd.clone();
+
+        let handle = thread::spawn(move || {
+            let child_result = std::process::Command::new(&shell)
+                .arg(&flag)
+                .arg(&cmd_clone)
+                .current_dir(&cwd_clone)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+
+            match child_result {
+                Ok(mut child) => {
+                    // Take stdout/stderr handles before storing the child,
+                    // so we can read them without holding the mutex.
+                    let stdout_handle = child.stdout.take();
+                    let stderr_handle = child.stderr.take();
+
+                    // Store child in the shared holder so the main thread
+                    // can kill it on Esc (cancel).
+                    if let Ok(mut guard) = child_holder.lock() {
+                        *guard = Some(child);
+                    }
+
+                    // Read stdout and stderr (these block until the process
+                    // exits or is killed, but do NOT hold the mutex).
+                    use std::io::Read;
+                    let mut stdout_buf = String::new();
+                    let mut stderr_buf = String::new();
+                    if let Some(mut h) = stdout_handle {
+                        let _ = h.read_to_string(&mut stdout_buf);
+                    }
+                    if let Some(mut h) = stderr_handle {
+                        let _ = h.read_to_string(&mut stderr_buf);
+                    }
+
+                    // Reap the child (wait for exit status) and remove
+                    // it from the holder.
+                    if let Ok(mut guard) = child_holder.lock() {
+                        if let Some(mut c) = guard.take() {
+                            let _ = c.wait();
+                        }
+                    }
+
+                    let _ = tx.send(TaskResult::CommandCompleted {
+                        stdout: stdout_buf,
+                        stderr: stderr_buf,
+                        command: cmd_clone,
+                        cwd: cwd_clone,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(TaskResult::CommandCompleted {
+                        stdout: String::new(),
+                        stderr: format!("Error: {}", e),
+                        command: cmd_clone,
+                        cwd: cwd_clone,
                     });
                 }
             }

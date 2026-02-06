@@ -137,12 +137,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bark-hex-editor"
+version = "0.1.0"
+dependencies = [
+ "bark-plugin-api",
+]
+
+[[package]]
 name = "bark-image-viewer"
 version = "0.1.0"
 dependencies = [
  "bark-plugin-api",
  "image",
  "kamadak-exif",
+]
+
+[[package]]
+name = "bark-macho-viewer"
+version = "0.1.0"
+dependencies = [
+ "bark-plugin-api",
 ]
 
 [[package]]

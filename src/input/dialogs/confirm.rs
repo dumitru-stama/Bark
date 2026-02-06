@@ -7,18 +7,30 @@ use crate::state::app::App;
 use crate::state::mode::Mode;
 
 pub fn handle_confirming_mode(app: &mut App, key: KeyEvent) {
-    let Mode::Confirming { operation, sources, dest_input, cursor_pos, focus } = &mut app.mode else {
+    let Mode::Confirming { operation, sources, dest_input, cursor_pos, focus, apply_all } = &mut app.mode else {
         return;
     };
 
     let is_delete = matches!(operation, crate::state::mode::FileOperation::Delete);
-    let max_focus = 2;
+    // When deleting a single directory, checkbox is a focusable element:
+    //   focus 1 = checkbox, 2 = Delete, 3 = Cancel
+    // Otherwise for delete: focus 1 = Delete, 2 = Cancel
+    // For copy/move: focus 0 = input, 1 = OK, 2 = Cancel
+    let show_checkbox = is_delete && sources.len() == 1 && sources[0].is_dir();
+    let max_focus = if show_checkbox { 3 } else { 2 };
     let min_focus = if is_delete { 1 } else { 0 };
+    let delete_button = if show_checkbox { 2 } else { 1 };
+    let cancel_button = if show_checkbox { 3 } else { 2 };
 
     match key.code {
         KeyCode::Esc => {
             app.ui.input_selected = false;
             app.mode = Mode::Normal;
+        }
+
+        // Space toggles checkbox when it's focused
+        KeyCode::Char(' ') if show_checkbox && *focus == 1 => {
+            *apply_all = !*apply_all;
         }
 
         KeyCode::Tab => {
@@ -41,19 +53,35 @@ pub fn handle_confirming_mode(app: &mut App, key: KeyEvent) {
 
         KeyCode::Enter => {
             app.ui.input_selected = false;
-            match *focus {
-                // Enter in text field or OK button executes the operation
-                0 | 1 => {
-                    let operation = operation.clone();
-                    let sources = sources.clone();
-                    let dest = PathBuf::from(dest_input.as_str());
-                    app.mode = Mode::Normal;
+
+            // Enter on checkbox toggles it
+            if show_checkbox && *focus == 1 {
+                *apply_all = !*apply_all;
+                return;
+            }
+
+            if *focus == 0 || *focus == delete_button {
+                // Enter in text field or Delete/OK button executes the operation
+                let operation = operation.clone();
+                let sources = sources.clone();
+                let dest = PathBuf::from(dest_input.as_str());
+                let apply = *apply_all;
+                app.mode = Mode::Normal;
+
+                // For delete of a single directory without apply_all,
+                // enumerate contents and confirm each item individually
+                if matches!(operation, crate::state::mode::FileOperation::Delete)
+                    && !apply
+                    && sources.len() == 1
+                    && sources[0].is_dir()
+                {
+                    let dir_path = sources[0].clone();
+                    app.start_iterative_delete(dir_path);
+                } else {
                     app.start_file_operation(operation, sources, dest);
                 }
-                2 => {
-                    app.mode = Mode::Normal;
-                }
-                _ => {}
+            } else if *focus == cancel_button {
+                app.mode = Mode::Normal;
             }
         }
 
@@ -106,6 +134,126 @@ pub fn handle_confirming_mode(app: &mut App, key: KeyEvent) {
 
         KeyCode::Right | KeyCode::Down if *focus < max_focus && *focus >= 1 => {
             *focus += 1;
+        }
+
+        _ => {}
+    }
+}
+
+pub fn handle_delete_iterative_mode(app: &mut App, key: KeyEvent) {
+    use crate::fs::utils::delete_path;
+
+    let Mode::DeleteIterative {
+        items, parent_dir, current, deleted_count, errors, apply_all, focus
+    } = &mut app.mode else {
+        return;
+    };
+
+    // focus 0 = checkbox, 1 = Delete, 2 = Skip, 3 = Cancel
+    let max_focus = 3;
+
+    match key.code {
+        KeyCode::Esc => {
+            // Cancel: finish with what we've done so far
+            let count = *deleted_count;
+            let errs = errors.clone();
+            app.mode = Mode::Normal;
+            // Don't try to remove parent since user cancelled
+            app.active_panel_mut().selected.clear();
+            app.left_panel.refresh();
+            app.right_panel.refresh();
+            app.refresh_git_status();
+            if count > 0 {
+                app.add_shell_output(format!("Deleted {} item(s) (cancelled)", count));
+            }
+            if !errs.is_empty() {
+                app.active_panel_mut().error = Some(format!(
+                    "{} errors: {}", errs.len(), errs.first().unwrap_or(&String::new())
+                ));
+            }
+        }
+
+        // Space toggles checkbox when focused on it
+        KeyCode::Char(' ') if *focus == 0 => {
+            *apply_all = !*apply_all;
+        }
+
+        KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+            *focus = (*focus + 1) % (max_focus + 1);
+        }
+
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+            *focus = if *focus == 0 { max_focus } else { *focus - 1 };
+        }
+
+        KeyCode::Enter => {
+            match *focus {
+                0 => {
+                    // Toggle checkbox
+                    *apply_all = !*apply_all;
+                }
+                1 => {
+                    // Delete this item
+                    let item = items[*current].clone();
+                    let result = delete_path(&item);
+                    match result {
+                        Ok(()) => *deleted_count += 1,
+                        Err(e) => errors.push(format!("{}: {}", item.display(), e)),
+                    }
+                    *current += 1;
+
+                    if *apply_all {
+                        // Delete all remaining items without asking
+                        while *current < items.len() {
+                            let item = items[*current].clone();
+                            let result = delete_path(&item);
+                            match result {
+                                Ok(()) => *deleted_count += 1,
+                                Err(e) => errors.push(format!("{}: {}", item.display(), e)),
+                            }
+                            *current += 1;
+                        }
+                    }
+
+                    if *current >= items.len() {
+                        let parent = parent_dir.clone();
+                        let count = *deleted_count;
+                        let errs = errors.clone();
+                        app.mode = Mode::Normal;
+                        app.finish_iterative_delete(parent, count, errs);
+                    }
+                }
+                2 => {
+                    // Skip this item
+                    *current += 1;
+                    if *current >= items.len() {
+                        let parent = parent_dir.clone();
+                        let count = *deleted_count;
+                        let errs = errors.clone();
+                        app.mode = Mode::Normal;
+                        app.finish_iterative_delete(parent, count, errs);
+                    }
+                }
+                3 => {
+                    // Cancel
+                    let count = *deleted_count;
+                    let errs = errors.clone();
+                    app.mode = Mode::Normal;
+                    app.active_panel_mut().selected.clear();
+                    app.left_panel.refresh();
+                    app.right_panel.refresh();
+                    app.refresh_git_status();
+                    if count > 0 {
+                        app.add_shell_output(format!("Deleted {} item(s) (cancelled)", count));
+                    }
+                    if !errs.is_empty() {
+                        app.active_panel_mut().error = Some(format!(
+                            "{} errors: {}", errs.len(), errs.first().unwrap_or(&String::new())
+                        ));
+                    }
+                }
+                _ => {}
+            }
         }
 
         _ => {}

@@ -13,7 +13,7 @@ A modern Norton Commander / Midnight Commander clone written in Rust with a focu
 - **Remote filesystem support** via SCP/SFTP and WebDAV/WebDAVS
 - **Archive browsing** - enter ZIP, TAR, TAR.7Z, 7z, RAR, and compressed archives as folders
 - **Integrated shell** with command history, output capture, and ANSI color support
-- **Built-in file viewer** with text and hex modes, plus ELF, PE binary, image, and PDF metadata inspectors
+- **Built-in file viewer** with text and hex modes, plus ELF, PE, Mach-O binary, image, and PDF metadata inspectors
 - **User Menu (F2)** for custom commands with hotkeys
 - **Git integration** showing branch and status in the status bar
 - **Customizable themes** with built-in dark, classic, and light presets
@@ -97,6 +97,8 @@ The source selector provides access to:
 - Saved SCP/SFTP connections
 - Saved WebDAV connections
 - New connection dialogs
+
+On Windows, pressing a drive letter (e.g., `C`) in the source selector immediately navigates to that drive.
 
 ### Archive Browsing
 
@@ -195,6 +197,7 @@ Configuration is stored in a platform-specific directory:
 :set <opt>=<val>   Change setting at runtime
 :theme <name>      Switch color theme
 :themes            List available themes
+:touch <file>      Create file or update timestamp (built-in fallback for Windows)
 :highlights        Show loaded file highlighting rules
 :q / :quit / :exit Quit
 ```
@@ -218,6 +221,7 @@ sort_both, sort_field_both     Sort field (both panels)
 remember_path, remember        Remember panel paths across sessions
 theme                          Switch color theme
 view_plugin_first              Check viewer plugins before built-in viewer (F3)
+hex_editor                     External hex editor command (default: jinx)
 ```
 
 ### Example Configuration
@@ -251,6 +255,7 @@ uppercase_first = false  # Sort uppercase before lowercase
 [editor]
 command = ""  # Uses $VISUAL or $EDITOR
 viewer = ""   # External viewer command (empty = built-in viewer)
+hex_editor = "jinx"  # External hex editor for the HexEditor viewer plugin
 
 [confirmations]
 delete = true     # Confirm before deleting files
@@ -367,8 +372,10 @@ Plugins can be written in **any language** -- Rust, Python, Go, C, shell scripts
 | `bark-archive` | Provider | Browse ZIP, TAR, 7z, RAR, xz, gz, bz2 archives |
 | `bark-elf-viewer` | Viewer | ELF binary header inspector |
 | `bark-pe-viewer` | Viewer | PE binary header inspector (exe/dll/sys/ocx/scr) with Authenticode signature verification |
+| `bark-macho-viewer` | Viewer | Mach-O binary header inspector (dylib/bundle/kext/object files) with code signature and entitlements |
 | `bark-image-viewer` | Viewer | Image metadata inspector (JPEG, PNG, GIF, BMP, WebP, TIFF, ICO, AVIF, TGA, DDS, HDR, EXR, QOI, PNM, Farbfeld) with EXIF/GPS data |
 | `bark-pdf-viewer` | Viewer | PDF document inspector (metadata, page details, fonts, structure, text preview) |
+| `bark-hex-editor` | Viewer | Hex editor launcher (runs external hex editor; default: jinx, configurable via `editor.hex_editor` in config) |
 | `system_status.py` | Status | System memory and CPU load (Python) |
 
 ### Installing Plugins
@@ -447,6 +454,7 @@ Connect to WebDAV servers (including NextCloud, ownCloud):
 - Shell auto-detection: prefers PowerShell 7 (pwsh), then Windows PowerShell, then cmd.exe
 - Override with `general.shell` in config (e.g., `shell = "cmd.exe"` or `shell = "pwsh"`)
 - On Windows 10, Ctrl+O automatically uses the shell history viewer (ConPTY limitations prevent the interactive shell)
+- Built-in `:touch` command creates files when no external `touch` is available (typical Windows without GNU tools)
 - Build natively on Windows with the standard Rust MSVC toolchain (`x86_64-pc-windows-msvc`); mingw is only needed for cross-compiling from Linux
 
 ## Building

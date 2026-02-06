@@ -63,6 +63,9 @@ pub struct App {
     pub background_task: Option<super::background::BackgroundTask>,
     /// Cancel token for file operations (shared with background thread)
     pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Child process handle for cancelling a running command (Windows)
+    #[cfg(windows)]
+    pub command_child: Option<std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>>,
 
     // === Persistent shell ===
     /// Persistent PTY shell (lives for app lifetime)
@@ -212,6 +215,8 @@ impl App {
             dir_sizes: std::collections::HashMap::new(),
             background_task: None,
             cancel_token: None,
+            #[cfg(windows)]
+            command_child: None,
             shell: None,
         }
     }
@@ -378,6 +383,8 @@ impl App {
             "themes",
             "highlights",
             "help",
+            "touch",
+            "shell",
             "quit",
             "exit",
             "q",
@@ -403,6 +410,7 @@ impl App {
                 if !matches.is_empty() {
                     *idx = (*idx + 1) % matches.len();
                     self.cmd.input = matches[*idx].clone();
+                    self.cmd.cursor = self.cmd.input.len();
                 }
                 return;
             }
@@ -417,11 +425,11 @@ impl App {
 
         if matches.len() == 1 {
             // Single match - complete it
-            self.cmd.input = matches[0].clone();
+            self.cmd.set_input(matches[0].clone());
             self.cmd.completion_state = None;
         } else if !matches.is_empty() {
             // Multiple matches - show first and set up cycling
-            self.cmd.input = matches[0].clone();
+            self.cmd.set_input(matches[0].clone());
             self.cmd.completion_state = Some((prefix, matches, 0));
         }
         // No matches - do nothing
@@ -612,6 +620,7 @@ impl App {
     /// Returns true if it was a built-in command, false if it should be run as shell command
     pub fn execute_command(&mut self) {
         let command = std::mem::take(&mut self.cmd.input);
+        self.cmd.cursor = 0;
         self.cmd.focused = false;
 
         // Add to history and reset navigation
@@ -736,6 +745,13 @@ impl App {
                 Some(self.show_settings())
             }
 
+            // Spawn interactive shell in current panel directory
+            "shell" => {
+                let cwd = self.active_panel().path.clone();
+                self.mode = Mode::SpawnShell { cwd };
+                Some(String::new())
+            }
+
             // Quit
             "q" | "quit" | "exit" => {
                 self.should_quit = true;
@@ -826,6 +842,44 @@ impl App {
                         }
                     }
                     None => Some("cd: Could not resolve path".to_string()),
+                }
+            }
+
+            // Touch: create file or update timestamp (built-in fallback when no external touch exists)
+            "touch" => {
+                if args.is_empty() {
+                    return Some("Usage: touch <filename>".to_string());
+                }
+                // If an external touch command exists, let the shell handle it
+                if has_external_command("touch") {
+                    return None;
+                }
+                // Resolve path relative to active panel
+                let path = std::path::Path::new(args);
+                let full_path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    self.active_panel().path.join(args)
+                };
+                if full_path.exists() {
+                    // Update modification time to now
+                    let now = filetime::FileTime::now();
+                    match filetime::set_file_mtime(&full_path, now) {
+                        Ok(()) => {
+                            self.active_panel_mut().refresh();
+                            Some(format!("Touched: {}", args))
+                        }
+                        Err(e) => Some(format!("touch: {}: {}", args, e)),
+                    }
+                } else {
+                    // Create empty file
+                    match std::fs::File::create(&full_path) {
+                        Ok(_) => {
+                            self.active_panel_mut().refresh();
+                            Some(format!("Created: {}", args))
+                        }
+                        Err(e) => Some(format!("touch: {}: {}", args, e)),
+                    }
                 }
             }
 
@@ -1102,6 +1156,16 @@ impl App {
                 format!("remember_path = {}", new_val)
             }
 
+            "hex_editor" => {
+                match value {
+                    Some(v) => {
+                        self.config.editor.hex_editor = v.to_string();
+                        format!("hex_editor = {}", v)
+                    }
+                    None => format!("hex_editor = {}", self.config.editor.hex_editor),
+                }
+            }
+
             "view_plugin_first" | "plugin_first" => {
                 let new_val = match value {
                     Some("true") | Some("1") | Some("on") | Some("yes") => true,
@@ -1145,7 +1209,7 @@ impl App {
 
     /// Help text for built-in commands
     fn builtin_help(&self) -> String {
-        "Built-in: config-save, config-reload, config-edit, config-upgrade, config-reset, show-hidden, show-settings, set <opt>=<val>, theme <name>, themes, q".to_string()
+        "Built-in: config-save, config-reload, config-edit, config-upgrade, config-reset, show-hidden, show-settings, set <opt>=<val>, theme <name>, themes, touch <file>, q".to_string()
     }
 
     // ========================================================================
@@ -1283,6 +1347,7 @@ impl App {
             dest_input: dest_str,
             cursor_pos,
             focus: 0, // Start with input field focused
+            apply_all: false,
         };
     }
 
@@ -1319,6 +1384,7 @@ impl App {
             dest_input: dest_str,
             cursor_pos,
             focus: 0, // Start with input field focused
+            apply_all: false,
         };
     }
 
@@ -1345,13 +1411,83 @@ impl App {
             return;
         }
 
+        // When deleting a single directory, checkbox is shown — Delete button is focus 2
+        let show_checkbox = sources.len() == 1 && sources[0].is_dir();
+        let initial_focus = if show_checkbox { 2 } else { 1 };
         self.mode = Mode::Confirming {
             operation: FileOperation::Delete,
             sources,
             dest_input: String::new(), // Not used for delete
             cursor_pos: 0,
-            focus: 1, // Start with Delete button focused (no input field)
+            focus: initial_focus,
+            apply_all: false,
         };
+    }
+
+    /// Start iterative deletion of a directory's contents (one item at a time).
+    /// Enumerates immediate children and enters DeleteIterative mode.
+    pub fn start_iterative_delete(&mut self, dir_path: PathBuf) {
+        match std::fs::read_dir(&dir_path) {
+            Ok(entries) => {
+                let mut items: Vec<PathBuf> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .collect();
+                items.sort();
+                if items.is_empty() {
+                    // Directory is already empty, just remove it
+                    match std::fs::remove_dir(&dir_path) {
+                        Ok(()) => self.add_shell_output(format!("Deleted empty directory \"{}\"", dir_path.display())),
+                        Err(e) => self.active_panel_mut().error = Some(format!("Failed to delete directory: {}", e)),
+                    }
+                    self.left_panel.refresh();
+                    self.right_panel.refresh();
+                    self.refresh_git_status();
+                } else {
+                    self.mode = Mode::DeleteIterative {
+                        items,
+                        parent_dir: dir_path,
+                        current: 0,
+                        deleted_count: 0,
+                        errors: Vec::new(),
+                        apply_all: false,
+                        // focus 0 = checkbox, 1 = Delete, 2 = Skip, 3 = Cancel
+                        focus: 1,
+                    };
+                }
+            }
+            Err(e) => {
+                self.active_panel_mut().error = Some(format!("Failed to read directory: {}", e));
+            }
+        }
+    }
+
+    /// Finish iterative deletion: try to remove the parent directory and report results.
+    pub fn finish_iterative_delete(&mut self, parent_dir: PathBuf, deleted_count: usize, errors: Vec<String>) {
+        // Try to remove the parent directory (will succeed if empty)
+        let mut total_deleted = deleted_count;
+        let mut all_errors = errors;
+        match std::fs::remove_dir(&parent_dir) {
+            Ok(()) => total_deleted += 1,
+            Err(e) => {
+                // Only report error if we deleted everything inside (directory should be empty)
+                if all_errors.is_empty() {
+                    all_errors.push(format!("{}: {}", parent_dir.display(), e));
+                }
+            }
+        }
+        self.active_panel_mut().selected.clear();
+        self.left_panel.refresh();
+        self.right_panel.refresh();
+        self.refresh_git_status();
+        if !all_errors.is_empty() {
+            self.active_panel_mut().error = Some(format!(
+                "Deleted {}, {} errors: {}",
+                total_deleted, all_errors.len(), all_errors.first().unwrap_or(&String::new())
+            ));
+        } else {
+            self.add_shell_output(format!("Deleted {} item(s)", total_deleted));
+        }
     }
 
     /// Apply file attributes (modification time, permissions) from a provider entry
@@ -1706,6 +1842,245 @@ impl App {
             include_dirs: true,
             focus: 0, // Start with pattern input focused
         };
+    }
+
+    /// Show the permissions editing dialog (Unix only)
+    #[cfg(not(windows))]
+    pub fn show_permissions_dialog(&mut self) {
+        if !self.active_panel().is_local() {
+            return;
+        }
+
+        let entries = self.active_panel().get_selected_entries();
+        if entries.is_empty() {
+            return;
+        }
+
+        let first = &entries[0];
+        let perms = first.permissions;
+        let owner = first.owner.clone();
+        let group = first.group.clone();
+        let has_dirs = entries.iter().any(|e| e.is_dir);
+        let paths: Vec<std::path::PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
+
+        self.mode = Mode::EditingPermissions {
+            paths,
+            owner,
+            group,
+            user_read: perms & 0o400 != 0,
+            user_write: perms & 0o200 != 0,
+            user_execute: perms & 0o100 != 0,
+            group_read: perms & 0o040 != 0,
+            group_write: perms & 0o020 != 0,
+            group_execute: perms & 0o010 != 0,
+            other_read: perms & 0o004 != 0,
+            other_write: perms & 0o002 != 0,
+            other_execute: perms & 0o001 != 0,
+            apply_recursive: false,
+            has_dirs,
+            focus: 0,
+        };
+    }
+
+    /// Apply permission changes to files (Unix only)
+    #[cfg(not(windows))]
+    pub fn apply_permissions(&mut self, paths: &[std::path::PathBuf], mode: u32, recursive: bool) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut errors = Vec::new();
+        for path in paths {
+            if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+                errors.push(format!("{}: {}", path.display(), e));
+                continue;
+            }
+            if recursive && path.is_dir() {
+                Self::apply_permissions_recursive(path, mode, &mut errors);
+            }
+        }
+
+        if !errors.is_empty() {
+            for err in &errors {
+                self.cmd.add_output(format!("chmod error: {}", err));
+            }
+        }
+
+        // Clear selection and refresh
+        self.active_panel_mut().clear_selection();
+        self.refresh_panels();
+    }
+
+    #[cfg(not(windows))]
+    fn apply_permissions_recursive(dir: &std::path::Path, mode: u32, errors: &mut Vec<String>) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push(format!("{}: {}", dir.display(), e));
+                return;
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    errors.push(format!("{}: {}", dir.display(), e));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)) {
+                errors.push(format!("{}: {}", path.display(), e));
+                continue;
+            }
+            if path.is_dir() {
+                Self::apply_permissions_recursive(&path, mode, errors);
+            }
+        }
+    }
+
+    /// Show the owner/group editing dialog (Unix only)
+    #[cfg(not(windows))]
+    pub fn show_chown_dialog(&mut self) {
+        if !self.active_panel().is_local() {
+            return;
+        }
+
+        let entries = self.active_panel().get_selected_entries();
+        if entries.is_empty() {
+            return;
+        }
+
+        let first = &entries[0];
+        let current_owner = first.owner.clone();
+        let current_group = first.group.clone();
+        let has_dirs = entries.iter().any(|e| e.is_dir);
+        let paths: Vec<std::path::PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
+
+        let users = crate::fs::entry::enumerate_users();
+        let groups = crate::fs::entry::enumerate_groups();
+
+        let user_selected = users.iter().position(|u| u == &current_owner).unwrap_or(0);
+        let group_selected = groups.iter().position(|g| g == &current_group).unwrap_or(0);
+
+        // Pre-scroll so the selected item is visible
+        let list_height: usize = 6;
+        let user_scroll = if user_selected >= list_height { user_selected - list_height + 1 } else { 0 };
+        let group_scroll = if group_selected >= list_height { group_selected - list_height + 1 } else { 0 };
+
+        self.mode = Mode::EditingOwner {
+            paths,
+            current_owner,
+            current_group,
+            users,
+            groups,
+            user_selected,
+            user_scroll,
+            group_selected,
+            group_scroll,
+            apply_recursive: false,
+            has_dirs,
+            focus: 0,
+        };
+    }
+
+    /// Apply owner/group changes to files (Unix only)
+    #[cfg(not(windows))]
+    pub fn apply_chown(&mut self, paths: &[std::path::PathBuf], user: &str, group: &str, recursive: bool) {
+        use std::ffi::CString;
+
+        // Resolve user name to uid
+        let uid = if let Ok(c_user) = CString::new(user) {
+            // SAFETY: getpwnam is safe to call with a valid C string
+            let pw = unsafe { libc::getpwnam(c_user.as_ptr()) };
+            if pw.is_null() {
+                self.cmd.add_output(format!("chown error: unknown user '{}'", user));
+                return;
+            }
+            unsafe { (*pw).pw_uid }
+        } else {
+            self.cmd.add_output(format!("chown error: invalid user name '{}'", user));
+            return;
+        };
+
+        // Resolve group name to gid
+        let gid = if let Ok(c_group) = CString::new(group) {
+            // SAFETY: getgrnam is safe to call with a valid C string
+            let gr = unsafe { libc::getgrnam(c_group.as_ptr()) };
+            if gr.is_null() {
+                self.cmd.add_output(format!("chown error: unknown group '{}'", group));
+                return;
+            }
+            unsafe { (*gr).gr_gid }
+        } else {
+            self.cmd.add_output(format!("chown error: invalid group name '{}'", group));
+            return;
+        };
+
+        let mut errors = Vec::new();
+        for path in paths {
+            Self::chown_path(path, uid, gid, &mut errors);
+            if recursive && path.is_dir() {
+                Self::chown_recursive(path, uid, gid, &mut errors);
+            }
+        }
+
+        if !errors.is_empty() {
+            for err in &errors {
+                self.cmd.add_output(format!("chown error: {}", err));
+            }
+        }
+
+        // Clear selection and refresh
+        self.active_panel_mut().clear_selection();
+        self.refresh_panels();
+    }
+
+    #[cfg(not(windows))]
+    fn chown_path(path: &std::path::Path, uid: u32, gid: u32, errors: &mut Vec<String>) {
+        use std::ffi::CString;
+
+        let c_path = match CString::new(path.to_string_lossy().as_bytes()) {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(format!("{}: {}", path.display(), e));
+                return;
+            }
+        };
+
+        // SAFETY: chown is safe with a valid C string path and valid uid/gid
+        let ret = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            errors.push(format!("{}: {}", path.display(), err));
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn chown_recursive(dir: &std::path::Path, uid: u32, gid: u32, errors: &mut Vec<String>) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push(format!("{}: {}", dir.display(), e));
+                return;
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    errors.push(format!("{}: {}", dir.display(), e));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            Self::chown_path(&path, uid, gid, errors);
+            if path.is_dir() {
+                Self::chown_recursive(&path, uid, gid, errors);
+            }
+        }
     }
 
     /// Show the user menu (F2)
@@ -2399,6 +2774,7 @@ impl App {
             title: "Connecting".to_string(),
             message: format!("Connecting to {}...", display_name),
             frame: 0,
+            started: std::time::Instant::now(),
         };
     }
 
@@ -2439,6 +2815,7 @@ impl App {
             title: "Connecting".to_string(),
             message: format!("Connecting to {}...", display_name),
             frame: 0,
+            started: std::time::Instant::now(),
         };
     }
 
@@ -2490,6 +2867,7 @@ impl App {
             title: "Connecting".to_string(),
             message: format!("Connecting to {}...", display),
             frame: 0,
+            started: std::time::Instant::now(),
         };
     }
 
@@ -2570,6 +2948,7 @@ impl App {
             title: "Opening".to_string(),
             message: format!("Opening {}...", name),
             frame: 0,
+            started: std::time::Instant::now(),
         };
     }
 
@@ -2759,6 +3138,7 @@ impl App {
             title: "Connecting".to_string(),
             message: format!("Connecting to {}...", display_name),
             frame: 0,
+            started: std::time::Instant::now(),
         };
     }
 
@@ -2871,6 +3251,7 @@ impl App {
             title: "Opening".to_string(),
             message: format!("Opening {}...", file_name),
             frame: 0,
+            started: std::time::Instant::now(),
         };
     }
 
@@ -3037,10 +3418,30 @@ impl App {
         }
     }
 
+    /// Build the config map passed to viewer plugins.
+    pub fn plugin_config(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        map.insert("editor.command".to_string(), self.config.editor.command.clone());
+        map.insert("editor.viewer".to_string(), self.config.editor.viewer.clone());
+        map.insert("editor.hex_editor".to_string(), self.config.editor.hex_editor.clone());
+        map
+    }
+
     /// View a file using a plugin or fall back to built-in viewer
     pub fn view_file_with_plugins(&mut self, path: &std::path::Path) {
         // Check if any plugin can handle this file
         if let Some(plugin) = self.plugins.find_viewer(path) {
+            // If the plugin needs terminal access (e.g. launches an interactive
+            // editor), signal main.rs to handle the terminal handoff instead of
+            // calling render() here with Bark's alternate screen still active.
+            if plugin.info().needs_terminal {
+                self.mode = Mode::TerminalPlugin {
+                    plugin_name: plugin.info().name.clone(),
+                    path: path.to_path_buf(),
+                };
+                return;
+            }
+
             // Request ALL lines from the plugin up front so scrolling is
             // purely local (no per-scroll process spawns).  We pass a very
             // large height so the plugin returns everything.
@@ -3049,6 +3450,7 @@ impl App {
                 width: self.ui.terminal_width as usize,
                 height: 1_000_000,
                 scroll: 0,
+                config: self.plugin_config(),
             };
 
             if let Some(result) = plugin.render(&context) {
@@ -3086,6 +3488,7 @@ impl App {
                         width: self.ui.terminal_width as usize,
                         height: 1_000_000,
                         scroll: 0,
+                        config: self.plugin_config(),
                     };
 
                     if let Some(result) = plugin.render(&context) {
@@ -3216,12 +3619,24 @@ impl App {
             };
         } else if let Some((plugin_name, can_handle)) = plugins.get(index - 1) {
             if *can_handle {
+                // If the plugin needs terminal access, signal main.rs
+                if let Some(plugin) = self.plugins.find_viewer_by_name(plugin_name) {
+                    if plugin.info().needs_terminal {
+                        self.mode = Mode::TerminalPlugin {
+                            plugin_name: plugin_name.clone(),
+                            path,
+                        };
+                        return;
+                    }
+                }
+
                 // Request ALL lines up front so scrolling is purely local.
                 let context = ViewerContext {
                     path: path.clone(),
                     width: self.ui.terminal_width as usize,
                     height: 1_000_000,
                     scroll: 0,
+                    config: self.plugin_config(),
                 };
 
                 if let Some(plugin) = self.plugins.find_viewer_by_name(plugin_name)
@@ -3484,9 +3899,23 @@ impl App {
 impl App {
     /// Cancel the current background task
     pub fn cancel_background_task(&mut self) {
+        // If there's a running command child process, kill the entire
+        // process tree (the shell + any sub-processes it spawned).
+        // This ensures pipe handles are closed so the background
+        // reader thread unblocks.
+        #[cfg(windows)]
+        if let Some(child_arc) = self.command_child.take() {
+            if let Ok(mut guard) = child_arc.lock() {
+                if let Some(child) = guard.take() {
+                    let pid = child.id();
+                    drop(child);
+                    crate::persistent_shell::kill_process_tree(pid);
+                }
+            }
+        }
         self.background_task = None;
         self.mode = Mode::Normal;
-        self.add_shell_output("Connection cancelled".to_string());
+        self.add_shell_output("Cancelled".to_string());
     }
 
     /// Check if a background task has completed and handle the result
@@ -3579,8 +4008,10 @@ impl App {
                 }
                 TaskResult::FileOpCompleted(result) => {
                     self.cancel_token = None;
-                    // Clear selection after operation
-                    self.active_panel_mut().selected.clear();
+                    // Clear selection after copy (keep for move so user sees what wasn't moved)
+                    if result.op_name != "Moved" {
+                        self.active_panel_mut().selected.clear();
+                    }
                     // Refresh both panels and git status
                     self.left_panel.refresh();
                     self.right_panel.refresh();
@@ -3598,6 +4029,33 @@ impl App {
                         }
                     } else {
                         self.add_shell_output(format!("{} {} file(s)", result.op_name, result.count));
+                    }
+                    self.mode = Mode::Normal;
+                }
+                TaskResult::CommandCompleted { stdout, stderr, command, cwd } => {
+                    #[cfg(windows)]
+                    { self.command_child = None; }
+                    for line in stdout.lines() {
+                        let line = line.trim_end_matches('\r');
+                        if !line.is_empty() {
+                            self.add_shell_output(line.to_string());
+                        }
+                    }
+                    for line in stderr.lines() {
+                        let line = line.trim_end_matches('\r');
+                        if !line.is_empty() {
+                            self.add_shell_output(line.to_string());
+                        }
+                    }
+                    self.left_panel.refresh();
+                    self.right_panel.refresh();
+
+                    // Inject into persistent shell history
+                    if self.shell.is_none() {
+                        self.init_shell();
+                    }
+                    if let Some(shell) = &mut self.shell {
+                        let _ = shell.inject_history(&command, &cwd);
                     }
                     self.mode = Mode::Normal;
                 }
@@ -3620,8 +4078,10 @@ impl App {
                         panel.restore_provider(prov);
                     }
 
-                    // Clear selection, refresh panels, show results
-                    self.active_panel_mut().selected.clear();
+                    // Clear selection after copy (keep for move so user sees what wasn't moved)
+                    if result.op_name != "Moved" {
+                        self.active_panel_mut().selected.clear();
+                    }
                     self.left_panel.refresh();
                     self.right_panel.refresh();
                     self.refresh_git_status();
@@ -3685,11 +4145,36 @@ impl App {
     /// Advance the spinner animation frame
     pub fn tick_spinner(&mut self) {
         if let Mode::BackgroundTask { frame, .. } = &mut self.mode {
-            *frame = (*frame + 1) % 10;
+            *frame = frame.wrapping_add(1);
         }
         if let Mode::FileOpProgress { frame, .. } = &mut self.mode {
-            *frame = (*frame + 1) % 10;
+            *frame = frame.wrapping_add(1);
         }
     }
+}
+
+/// Check if an external command exists in PATH.
+fn has_external_command(cmd: &str) -> bool {
+    let path_var = match std::env::var("PATH") {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    for dir in path_var.split(separator) {
+        if cfg!(windows) {
+            for ext in &[".exe", ".cmd", ".bat", ".com"] {
+                let full = std::path::Path::new(dir).join(format!("{}{}", cmd, ext));
+                if full.exists() {
+                    return true;
+                }
+            }
+        } else {
+            let full = std::path::Path::new(dir).join(cmd);
+            if full.exists() {
+                return true;
+            }
+        }
+    }
+    false
 }
 

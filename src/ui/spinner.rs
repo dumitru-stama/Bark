@@ -10,7 +10,20 @@ use ratatui::{
 use super::Theme;
 
 /// Spinner animation frames (Braille dots pattern)
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES_UNICODE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// ASCII-safe spinner frames for Windows 10 (console font may lack Braille)
+#[allow(dead_code)]
+const SPINNER_FRAMES_ASCII: &[&str] = &["|", "/", "-", "\\", "|", "/", "-", "\\"];
+
+/// Pick the right spinner frames for the current platform.
+fn spinner_frames() -> &'static [&'static str] {
+    #[cfg(windows)]
+    if crate::persistent_shell::is_windows_10_or_older() {
+        return SPINNER_FRAMES_ASCII;
+    }
+    SPINNER_FRAMES_UNICODE
+}
 
 /// A spinner widget that shows an animated indicator with a message
 #[allow(dead_code)]
@@ -29,7 +42,7 @@ pub struct Spinner<'a> {
 impl<'a> Spinner<'a> {
     pub fn new(frame: usize, message: &'a str) -> Self {
         Self {
-            frame: frame % SPINNER_FRAMES.len(),
+            frame: frame % spinner_frames().len(),
             message,
             spinner_style: Style::default(),
             message_style: Style::default(),
@@ -54,7 +67,7 @@ impl Widget for Spinner<'_> {
         }
 
         // Get spinner character for current frame
-        let spinner_char = SPINNER_FRAMES[self.frame];
+        let spinner_char = spinner_frames()[self.frame];
 
         // Render spinner
         buf.set_string(area.x, area.y, spinner_char, self.spinner_style);
@@ -85,7 +98,7 @@ pub struct SpinnerDialog<'a> {
 impl<'a> SpinnerDialog<'a> {
     pub fn new(frame: usize, title: &'a str, message: &'a str) -> Self {
         Self {
-            frame: frame % SPINNER_FRAMES.len(),
+            frame: frame % spinner_frames().len(),
             title,
             message,
             border_style: Style::default(),
@@ -106,12 +119,17 @@ impl<'a> SpinnerDialog<'a> {
 
 impl Widget for SpinnerDialog<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Split message into lines
+        let lines: Vec<&str> = self.message.lines().collect();
+        let msg_lines = lines.len().max(1);
+
         // Calculate dialog size
-        let msg_len = self.message.chars().count();
+        let max_line_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
         let title_len = self.title.chars().count();
-        let content_width = msg_len.max(title_len) + 4; // +4 for spinner + padding
+        let content_width = max_line_len.max(title_len) + 4; // +4 for spinner + padding
         let dialog_width = (content_width + 4).min(area.width as usize) as u16; // +4 for borders
-        let dialog_height: u16 = 5; // border + padding + content + padding + border
+        // border + padding + spinner line + extra lines + help line + border
+        let dialog_height = (3 + msg_lines as u16 + 2).max(5);
 
         if area.width < dialog_width || area.height < dialog_height {
             return;
@@ -156,12 +174,29 @@ impl Widget for SpinnerDialog<'_> {
             buf.set_string(title_x, y, &title_with_padding, self.border_style);
         }
 
-        // Spinner and message centered
-        let spinner_char = SPINNER_FRAMES[self.frame];
-        let content = format!("{} {}", spinner_char, self.message);
-        let content_x = x + (dialog_width - content.chars().count() as u16) / 2;
-        let content_y = y + dialog_height / 2;
+        // Spinner and first line centered
+        let spinner_char = spinner_frames()[self.frame];
+        let first_line = lines.first().copied().unwrap_or("");
+        let content = format!("{} {}", spinner_char, first_line);
+        let content_x = x + (dialog_width.saturating_sub(content.chars().count() as u16)) / 2;
+        let content_y = y + 2;
         buf.set_string(content_x, content_y, &content, self.content_style);
+
+        // Additional lines (e.g., elapsed time)
+        for (i, line) in lines.iter().skip(1).enumerate() {
+            let line_x = x + (dialog_width.saturating_sub(line.chars().count() as u16)) / 2;
+            let line_y = content_y + 1 + i as u16;
+            if line_y < y + dialog_height - 1 {
+                buf.set_string(line_x, line_y, line, self.content_style);
+            }
+        }
+
+        // "Esc = Cancel" on bottom border
+        let help = "Esc = Cancel";
+        if dialog_width > help.len() as u16 + 4 {
+            let help_x = x + (dialog_width.saturating_sub(help.len() as u16)) / 2;
+            buf.set_string(help_x, y + dialog_height - 1, help, self.border_style);
+        }
     }
 }
 
@@ -206,7 +241,7 @@ impl<'a> FileOpProgressDialog<'a> {
         theme: &'a Theme,
     ) -> Self {
         Self {
-            frame: frame % SPINNER_FRAMES.len(),
+            frame: frame % spinner_frames().len(),
             title,
             current_file,
             bytes_done,
@@ -273,7 +308,7 @@ impl Widget for FileOpProgressDialog<'_> {
         }
 
         // Title
-        let title = format!(" {} {} ", SPINNER_FRAMES[self.frame], self.title);
+        let title = format!(" {} {} ", spinner_frames()[self.frame], self.title);
         let title_x = dialog_area.x + (dialog_area.width.saturating_sub(title.len() as u16)) / 2;
         buf.set_string(title_x, dialog_area.y, &title, title_style);
 

@@ -311,6 +311,16 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         app.show_select_files_dialog();
         return;
     }
+    #[cfg(not(windows))]
+    if app.key_matches("permissions", &key) {
+        app.show_permissions_dialog();
+        return;
+    }
+    #[cfg(not(windows))]
+    if app.key_matches("chown", &key) {
+        app.show_chown_dialog();
+        return;
+    }
     if app.key_matches("unselect_all", &key) {
         let count = app.active_panel().selected.len();
         if count > 0 {
@@ -324,23 +334,23 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     if app.key_matches("insert_filename", &key) && app.config.general.edit_mode_always {
         if let Some(entry) = app.active_panel().selected()
             && entry.name != ".." {
-                app.cmd.input.push_str(&shell_escape(&entry.name));
-                app.cmd.input.push(' ');
+                let s = shell_escape(&entry.name) + " ";
+                app.cmd.insert_str(&s);
             }
         return;
     }
     if app.key_matches("insert_path", &key) && app.config.general.edit_mode_always {
         let path_str = app.active_panel().path.to_string_lossy();
-        app.cmd.input.push_str(&shell_escape(&path_str));
-        app.cmd.input.push(' ');
+        let s = shell_escape(&path_str) + " ";
+        app.cmd.insert_str(&s);
         return;
     }
     if app.key_matches("insert_fullpath", &key) && app.config.general.edit_mode_always {
         if let Some(entry) = app.active_panel().selected()
             && entry.name != ".." {
                 let path_str = entry.path.to_string_lossy();
-                app.cmd.input.push_str(&shell_escape(&path_str));
-                app.cmd.input.push(' ');
+                let s = shell_escape(&path_str) + " ";
+                app.cmd.insert_str(&s);
             }
         return;
     }
@@ -381,7 +391,7 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
             if app.active_panel().is_temp_mode() {
                 app.active_panel_mut().exit_temp_mode();
             } else if app.config.general.edit_mode_always {
-                app.cmd.input.clear();
+                app.cmd.clear_input();
             }
         }
 
@@ -427,8 +437,8 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Backspace => {
             if app.config.general.edit_mode_always {
-                // In edit_mode_always, backspace only deletes from command line
-                app.cmd.input.pop();
+                // In edit_mode_always, backspace deletes char before cursor
+                app.cmd.delete_char_before();
             } else {
                 // Go to parent directory
                 app.active_panel_mut().go_parent();
@@ -516,7 +526,7 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
 
         // In edit_mode_always, regular characters go to command line
         KeyCode::Char(c) if app.config.general.edit_mode_always && !ctrl && !alt => {
-            app.cmd.input.push(c);
+            app.cmd.insert_char(c);
         }
 
         _ => {}
@@ -527,25 +537,20 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-    // Shell area scrolling (Ctrl+Arrow/Page or Alt+Arrow/Page)
-    if ctrl || alt {
+    // Shell area scrolling (Alt+Arrow/Page or Ctrl+Page)
+    if alt {
         match key.code {
-            KeyCode::Up => {
-                app.cmd.scroll_up(1);
-                return;
-            }
-            KeyCode::Down => {
-                app.cmd.scroll_down(1);
-                return;
-            }
-            KeyCode::PageUp => {
-                app.cmd.scroll_up(10);
-                return;
-            }
-            KeyCode::PageDown => {
-                app.cmd.scroll_down(10);
-                return;
-            }
+            KeyCode::Up => { app.cmd.scroll_up(1); return; }
+            KeyCode::Down => { app.cmd.scroll_down(1); return; }
+            KeyCode::PageUp => { app.cmd.scroll_up(10); return; }
+            KeyCode::PageDown => { app.cmd.scroll_down(10); return; }
+            _ => {}
+        }
+    }
+    if ctrl {
+        match key.code {
+            KeyCode::PageUp => { app.cmd.scroll_up(10); return; }
+            KeyCode::PageDown => { app.cmd.scroll_down(10); return; }
             _ => {}
         }
     }
@@ -554,7 +559,7 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
         // Cancel command input
         KeyCode::Esc => {
             app.cmd.focused = false;
-            app.cmd.input.clear();
+            app.cmd.clear_input();
             app.cmd.history_index = None;
             app.cmd.history_temp.clear();
             app.reset_completion();
@@ -564,16 +569,16 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
         KeyCode::Char('f') if ctrl => {
             if let Some(entry) = app.active_panel().selected()
                 && entry.name != ".." {
-                    app.cmd.input.push_str(&shell_escape(&entry.name));
-                    app.cmd.input.push(' ');
+                    let s = shell_escape(&entry.name) + " ";
+                    app.cmd.insert_str(&s);
                 }
         }
 
         // Insert current folder path into command line (Ctrl+P for Path)
         KeyCode::Char('p') if ctrl => {
             let path_str = app.active_panel().path.to_string_lossy();
-            app.cmd.input.push_str(&shell_escape(&path_str));
-            app.cmd.input.push(' ');
+            let s = shell_escape(&path_str) + " ";
+            app.cmd.insert_str(&s);
         }
 
         // Insert full path into command line (Alt+Enter) - only in edit_mode_always
@@ -581,8 +586,8 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
             if let Some(entry) = app.active_panel().selected()
                 && entry.name != ".." {
                     let path_str = entry.path.to_string_lossy();
-                    app.cmd.input.push_str(&shell_escape(&path_str));
-                    app.cmd.input.push(' ');
+                    let s = shell_escape(&path_str) + " ";
+                    app.cmd.insert_str(&s);
                 }
         }
 
@@ -602,10 +607,40 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
             app.complete_command();
         }
 
-        // Delete character
+        // Cursor movement
+        KeyCode::Left if ctrl => {
+            app.cmd.cursor_word_left();
+        }
+        KeyCode::Right if ctrl => {
+            app.cmd.cursor_word_right();
+        }
+        KeyCode::Left => {
+            app.cmd.cursor_left();
+        }
+        KeyCode::Right => {
+            app.cmd.cursor_right();
+        }
+        KeyCode::Home => {
+            app.cmd.cursor_home();
+        }
+        KeyCode::End => {
+            app.cmd.cursor_end();
+        }
+
+        // Delete character before cursor
+        KeyCode::Backspace if ctrl => {
+            app.reset_completion();
+            app.cmd.delete_word_before();
+        }
         KeyCode::Backspace => {
             app.reset_completion();
-            app.cmd.input.pop();
+            app.cmd.delete_char_before();
+        }
+
+        // Delete character at cursor
+        KeyCode::Delete => {
+            app.reset_completion();
+            app.cmd.delete_char_at();
         }
 
         // History navigation
@@ -630,23 +665,39 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
             }
         }
 
-        // Clear line
-        KeyCode::Char('u') if ctrl => {
-            app.reset_completion();
-            app.cmd.input.clear();
+        // Ctrl+A — move to start of line
+        KeyCode::Char('a') if ctrl => {
+            app.cmd.cursor_home();
         }
 
-        // Clear to end (effectively clear all since no cursor movement)
+        // Ctrl+E — move to end of line
+        KeyCode::Char('e') if ctrl => {
+            app.cmd.cursor_end();
+        }
+
+        // Ctrl+W — delete word before cursor
+        KeyCode::Char('w') if ctrl => {
+            app.reset_completion();
+            app.cmd.delete_word_before();
+        }
+
+        // Ctrl+U — delete to start of line
+        KeyCode::Char('u') if ctrl => {
+            app.reset_completion();
+            app.cmd.delete_to_start();
+        }
+
+        // Ctrl+K — delete to end of line
         KeyCode::Char('k') if ctrl => {
             app.reset_completion();
-            app.cmd.input.clear();
+            app.cmd.delete_to_end();
         }
 
         // Type character (must be after ctrl combinations)
         KeyCode::Char(c) if !ctrl => {
             app.cmd.scroll_to_bottom();
             app.reset_completion();
-            app.cmd.input.push(c);
+            app.cmd.insert_char(c);
         }
 
         _ => {}

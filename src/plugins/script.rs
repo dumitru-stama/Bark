@@ -67,11 +67,14 @@ impl ScriptPlugin {
             }
         }
 
+        let needs_terminal = extract_json_bool(output.trim(), "needs_terminal").unwrap_or(false);
+
         Ok(PluginInfo {
             name,
             version,
             plugin_type,
             source: PluginSource::Script(path.to_path_buf()),
+            needs_terminal,
         })
     }
 
@@ -156,12 +159,19 @@ impl ViewerPlugin for ScriptPlugin {
     }
 
     fn render(&self, context: &ViewerContext) -> Option<ViewerRenderResult> {
+        // Build config JSON object
+        let config_entries: Vec<String> = context.config.iter()
+            .map(|(k, v)| format!("\"{}\":\"{}\"", escape_json(k), escape_json(v)))
+            .collect();
+        let config_json = format!("{{{}}}", config_entries.join(","));
+
         let args = format!(
-            "\"path\":\"{}\",\"width\":{},\"height\":{},\"scroll\":{}",
+            "\"path\":\"{}\",\"width\":{},\"height\":{},\"scroll\":{},\"config\":{}",
             escape_json(&context.path.to_string_lossy()),
             context.width,
             context.height,
-            context.scroll
+            context.scroll,
+            config_json
         );
 
         let response = self.execute_command("viewer_render", &args)?;

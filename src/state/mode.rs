@@ -171,9 +171,23 @@ pub enum Mode {
         /// If editing a remote file: (panel_side, remote_path)
         remote_info: Option<(Side, String)>,
     },
+    /// A viewer plugin needs terminal access (e.g. hex editor launcher).
+    /// Signals main loop to leave alternate screen, run the configured
+    /// command directly, then restore TUI and open the built-in viewer.
+    TerminalPlugin {
+        /// Name of the plugin (for diagnostics / future use)
+        #[allow(dead_code)]
+        plugin_name: String,
+        /// File path to pass to the plugin
+        path: std::path::PathBuf,
+    },
     /// Running a command - signals main loop to execute
     RunningCommand {
         command: String,
+        cwd: std::path::PathBuf,
+    },
+    /// Spawn an interactive shell in the given directory
+    SpawnShell {
         cwd: std::path::PathBuf,
     },
     /// Shell visible (Ctrl+O)
@@ -187,6 +201,25 @@ pub enum Mode {
         dest_input: String,
         cursor_pos: usize,
         /// Focused element: 0 = input field (copy/move only), 1 = OK/Delete, 2 = Cancel
+        focus: usize,
+        /// "Apply for all" checkbox state (delete only, for directories)
+        apply_all: bool,
+    },
+    /// Iterative delete confirmation (per-item in a directory)
+    DeleteIterative {
+        /// All items to potentially delete (immediate children of the folder)
+        items: Vec<PathBuf>,
+        /// The parent directory being deleted
+        parent_dir: PathBuf,
+        /// Index of the item currently being confirmed
+        current: usize,
+        /// Number of items deleted so far
+        deleted_count: usize,
+        /// Errors encountered
+        errors: Vec<String>,
+        /// Apply for all (delete remaining without asking)
+        apply_all: bool,
+        /// Focused button: 0 = Delete, 1 = Skip, 2 = Cancel
         focus: usize,
     },
     /// Source selection dialog (drives on Windows, quick access + remote connections on all platforms)
@@ -332,6 +365,8 @@ pub enum Mode {
         message: String,
         /// Current spinner animation frame
         frame: usize,
+        /// When the task started (for elapsed time display)
+        started: std::time::Instant,
     },
     /// User menu dialog (F2)
     UserMenu {
@@ -419,6 +454,60 @@ pub enum Mode {
         error: Option<String>,
         /// File path to retry viewing after password is set (for encrypted-files archives)
         retry_path: Option<PathBuf>,
+    },
+    /// Editing file permissions (Unix only)
+    #[cfg(not(windows))]
+    EditingPermissions {
+        /// Paths to modify
+        paths: Vec<PathBuf>,
+        /// Owner name of first file
+        owner: String,
+        /// Group name of first file
+        group: String,
+        /// Permission bits
+        user_read: bool,
+        user_write: bool,
+        user_execute: bool,
+        group_read: bool,
+        group_write: bool,
+        group_execute: bool,
+        other_read: bool,
+        other_write: bool,
+        other_execute: bool,
+        /// Apply recursively to directory contents
+        apply_recursive: bool,
+        /// Whether any path in selection is a directory
+        has_dirs: bool,
+        /// Focus: 0-8 = permission checkboxes, 9 = recursive (if has_dirs), then OK, Cancel
+        focus: usize,
+    },
+    /// Editing file owner/group (Unix only)
+    #[cfg(not(windows))]
+    EditingOwner {
+        /// Paths to modify
+        paths: Vec<PathBuf>,
+        /// Current owner name of first file
+        current_owner: String,
+        /// Current group name of first file
+        current_group: String,
+        /// All system users
+        users: Vec<String>,
+        /// All system groups
+        groups: Vec<String>,
+        /// Selected user index
+        user_selected: usize,
+        /// Scroll offset for user list
+        user_scroll: usize,
+        /// Selected group index
+        group_selected: usize,
+        /// Scroll offset for group list
+        group_scroll: usize,
+        /// Apply recursively to directory contents
+        apply_recursive: bool,
+        /// Whether any path in selection is a directory
+        has_dirs: bool,
+        /// Focus: 0 = user list, 1 = group list, 2 = recursive (if has_dirs), then OK, Cancel
+        focus: usize,
     },
     /// File operation progress dialog
     FileOpProgress {

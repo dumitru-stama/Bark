@@ -100,10 +100,15 @@ install-plugins: release
 	cp $(TARGET)/release/bark-pe-viewer $(PLUGIN_DIR)/
 	cp $(TARGET)/release/bark-image-viewer $(PLUGIN_DIR)/
 	cp $(TARGET)/release/bark-pdf-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/release/bark-macho-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/release/bark-hex-editor $(PLUGIN_DIR)/
 	cp plugins/scripts/*.py $(PLUGIN_DIR)/ 2>/dev/null || true
 	cp plugins/scripts/*.sh $(PLUGIN_DIR)/ 2>/dev/null || true
 	chmod +x $(PLUGIN_DIR)/* 2>/dev/null || true
+	@mkdir -p $(HOME)/tools
+	cp $(TARGET)/release/ba $(HOME)/tools/
 	@echo "Plugins installed to $(PLUGIN_DIR)"
+	@echo "ba installed to $(HOME)/tools/ba"
 
 # Install debug plugin builds
 install-plugins-debug: debug
@@ -115,6 +120,8 @@ install-plugins-debug: debug
 	cp $(TARGET)/debug/bark-pe-viewer $(PLUGIN_DIR)/
 	cp $(TARGET)/debug/bark-image-viewer $(PLUGIN_DIR)/
 	cp $(TARGET)/debug/bark-pdf-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/debug/bark-macho-viewer $(PLUGIN_DIR)/
+	cp $(TARGET)/debug/bark-hex-editor $(PLUGIN_DIR)/
 	cp plugins/scripts/*.py $(PLUGIN_DIR)/ 2>/dev/null || true
 	chmod +x $(PLUGIN_DIR)/* 2>/dev/null || true
 	@echo "Debug plugins installed to $(PLUGIN_DIR)"
@@ -144,3 +151,4 @@ help:
 	@echo "  $(TARGET)/release/bark-pe-viewer  PE viewer plugin"
 	@echo "  $(TARGET)/release/bark-image-viewer Image viewer plugin"
 	@echo "  $(TARGET)/release/bark-pdf-viewer  PDF viewer plugin"
+	@echo "  $(TARGET)/release/bark-hex-editor  Hex editor launcher plugin"

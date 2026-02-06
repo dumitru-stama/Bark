@@ -32,6 +32,9 @@ pub struct PluginInfo {
     pub version: String,
     pub plugin_type: PluginType,
     pub source: PluginSource,
+    /// Plugin needs direct terminal access (Bark will leave alternate screen
+    /// and disable raw mode before calling render, then restore after).
+    pub needs_terminal: bool,
 }
 
 /// Where the plugin was loaded from
@@ -71,6 +74,8 @@ pub struct ViewerContext {
     pub height: usize,
     /// Current scroll offset
     pub scroll: usize,
+    /// Configuration values from Bark (flattened key-value pairs)
+    pub config: std::collections::HashMap<String, String>,
 }
 
 /// Result from a status bar plugin

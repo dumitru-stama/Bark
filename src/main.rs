@@ -36,7 +36,7 @@ mod win_console;
 use state::app::App;
 use state::mode::Mode;
 use state::Side;
-use ui::{ArchivePasswordPromptDialog, CommandHistoryDialog, ConfirmDialog, SimpleConfirmDialog, SourceSelector, FileViewer, FindFilesDialog, HelpViewer, MkdirDialog, OverwriteConfirmDialog, PanelWidget, PluginViewer, ScpConnectDialog, ScpPasswordPromptDialog, SelectFilesDialog, ShellArea, ShellHistoryViewer, SpinnerDialog, StatusBar, ViewerPluginMenu, ViewerSearchDialog, UserMenuDialog, UserMenuEditDialog, FileOpProgressDialog};
+use ui::{ArchivePasswordPromptDialog, CommandHistoryDialog, ConfirmDialog, DeleteIterativeDialog, SimpleConfirmDialog, SourceSelector, FileViewer, FindFilesDialog, HelpViewer, MkdirDialog, OverwriteConfirmDialog, PanelWidget, PluginViewer, ScpConnectDialog, ScpPasswordPromptDialog, SelectFilesDialog, ShellArea, ShellHistoryViewer, SpinnerDialog, StatusBar, ViewerPluginMenu, ViewerSearchDialog, UserMenuDialog, UserMenuEditDialog, FileOpProgressDialog};
 use ui::dialog::{archive_password_prompt_cursor_position, dialog_cursor_position, mkdir_cursor_position, find_files_pattern_cursor_position, find_files_content_cursor_position, find_files_path_cursor_position, viewer_search_text_cursor_position, viewer_search_hex_cursor_position, select_files_cursor_position, scp_connect_cursor_position, scp_password_prompt_cursor_position, user_menu_edit_cursor_position, PluginConnectDialog, plugin_connect_cursor_position};
 use input::get_help_text;
 
@@ -274,14 +274,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                     let show_cursor = app.cmd.focused ||
                         (app.config.general.edit_mode_always && matches!(app.mode, Mode::Normal));
                     if show_cursor {
-                        let cursor_x = main_chunks[2].x + prompt.len() as u16 + app.cmd.input.len() as u16;
+                        let cursor_x = main_chunks[2].x + prompt.len() as u16 + app.cmd.cursor_display_offset() as u16;
                         let cursor_y = main_chunks[2].y + main_chunks[2].height - 1;
                         frame.set_cursor_position((cursor_x, cursor_y));
                     }
 
                     // Render confirmation dialog if in confirming mode (overlay)
-                    if let Mode::Confirming { operation, sources, dest_input, cursor_pos, focus } = &app.mode {
-                        let dialog = ConfirmDialog::new(operation, sources, dest_input, *cursor_pos, *focus, app.ui.input_selected, &app.theme);
+                    if let Mode::Confirming { operation, sources, dest_input, cursor_pos, focus, apply_all } = &app.mode {
+                        let dialog = ConfirmDialog::new(operation, sources, dest_input, *cursor_pos, *focus, app.ui.input_selected, *apply_all, &app.theme);
                         frame.render_widget(dialog, size);
 
                         // Position cursor in dialog input field (only when input is focused)
@@ -289,6 +289,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                             let (cx, cy) = dialog_cursor_position(size, dest_input, *cursor_pos);
                             frame.set_cursor_position((cx, cy));
                         }
+                    }
+
+                    // Render iterative delete confirmation dialog (overlay)
+                    if let Mode::DeleteIterative { items, current, apply_all, focus, .. } = &app.mode {
+                        let dialog = DeleteIterativeDialog::new(items, *current, *apply_all, *focus, &app.theme);
+                        frame.render_widget(dialog, size);
                     }
 
                     // Render source selector if in source selector mode (overlay on target panel)
@@ -607,9 +613,53 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         frame.render_widget(dialog, size);
                     }
 
+                    // Render permissions dialog (Unix only)
+                    #[cfg(not(windows))]
+                    if let Mode::EditingPermissions {
+                        paths, owner, group,
+                        user_read, user_write, user_execute,
+                        group_read, group_write, group_execute,
+                        other_read, other_write, other_execute,
+                        apply_recursive, has_dirs, focus,
+                    } = &app.mode {
+                        let perms = [
+                            *user_read, *user_write, *user_execute,
+                            *group_read, *group_write, *group_execute,
+                            *other_read, *other_write, *other_execute,
+                        ];
+                        let dialog = ui::EditPermissionsDialog::new(
+                            paths, owner, group, perms,
+                            *apply_recursive, *has_dirs, *focus, &app.theme,
+                        );
+                        frame.render_widget(dialog, size);
+                    }
+
+                    // Render owner/group dialog (Unix only)
+                    #[cfg(not(windows))]
+                    if let Mode::EditingOwner {
+                        paths, current_owner, current_group,
+                        users, groups,
+                        user_selected, user_scroll,
+                        group_selected, group_scroll,
+                        apply_recursive, has_dirs, focus,
+                        ..
+                    } = &app.mode {
+                        let dialog = ui::EditOwnerDialog::new(
+                            paths, current_owner, current_group,
+                            users, groups,
+                            *user_selected, *user_scroll,
+                            *group_selected, *group_scroll,
+                            *apply_recursive, *has_dirs, *focus, &app.theme,
+                        );
+                        frame.render_widget(dialog, size);
+                    }
+
                     // Render spinner dialog for background tasks (overlay)
-                    if let Mode::BackgroundTask { title, message, frame: spinner_frame } = &app.mode {
-                        let spinner = SpinnerDialog::new(*spinner_frame, title, message)
+                    if let Mode::BackgroundTask { title, message, frame: spinner_frame, started } = &app.mode {
+                        let elapsed = started.elapsed();
+                        let elapsed_str = format!("{}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
+                        let msg_with_time = format!("{}\nElapsed: {}", message, elapsed_str);
+                        let spinner = SpinnerDialog::new(*spinner_frame, title, &msg_with_time)
                             .border_style(Style::default().fg(app.theme.panel_border_active))
                             .content_style(Style::default().fg(app.theme.cursor_fg).bg(app.theme.cursor_bg));
                         frame.render_widget(spinner, size);
@@ -635,58 +685,78 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             let cmd_line = format!("{}> {}", cwd.display(), actual_command);
             app.add_shell_output(cmd_line);
 
-            // ── Windows: run via .output() pipe capture ──
-            // ConPTY buffers screen-buffer output and doesn't flush to the
-            // reader pipe in real-time, so the persistent shell approach
-            // doesn't work for TUI commands.  Use .output() with pipe
-            // capture instead (same as how Unix uses `script` — each command
-            // runs in a fresh process, so env changes don't persist, matching
-            // Unix behaviour).
+            // ── Windows 10: run in background thread with spinner ──
+            // On Windows 10 (and older) ConPTY buffers screen-buffer output
+            // and doesn't flush to the reader pipe in real-time, so the
+            // persistent shell approach doesn't work for TUI commands.
+            // Spawn via background task so the TUI stays responsive and the
+            // user can cancel.
+            //
+            // On Windows 11+ ConPTY works properly, so we leave the TUI and
+            // run the command on the real terminal (same approach as Unix).
             #[cfg(windows)]
             {
-                let shell = persistent_shell::resolve_shell(&app.config.general.shell);
-                let flag = persistent_shell::shell_command_flag(&shell);
+                if persistent_shell::is_windows_10_or_older() {
+                    use state::background::BackgroundTask;
 
-                let result = std::process::Command::new(&shell)
-                    .arg(&flag)
-                    .arg(&actual_command)
-                    .current_dir(&cwd)
-                    .output();
-                match result {
-                    Ok(output) => {
-                        let stdout_text = String::from_utf8_lossy(&output.stdout);
-                        for line in stdout_text.lines() {
-                            let line = line.trim_end_matches('\r');
-                            if !line.is_empty() {
-                                app.add_shell_output(line.to_string());
+                    let shell = persistent_shell::resolve_shell(&app.config.general.shell);
+                    let flag = persistent_shell::shell_command_flag(&shell).to_string();
+
+                    let child_holder = std::sync::Arc::new(std::sync::Mutex::new(None));
+                    app.command_child = Some(child_holder.clone());
+
+                    let task = BackgroundTask::run_command(
+                        shell, flag, actual_command.clone(), cwd.clone(), child_holder,
+                    );
+                    app.background_task = Some(task);
+                    app.mode = Mode::BackgroundTask {
+                        title: "Running command".to_string(),
+                        message: actual_command,
+                        frame: 0,
+                        started: std::time::Instant::now(),
+                    };
+                    needs_redraw = true;
+                    continue;
+                } else {
+                    // Windows 11+: leave TUI, run on real terminal
+                    let shell = persistent_shell::resolve_shell(&app.config.general.shell);
+                    let flag = persistent_shell::shell_command_flag(&shell);
+
+                    restore_terminal()?;
+                    println!("{}> {}", cwd.display(), actual_command);
+
+                    let status = std::process::Command::new(&shell)
+                        .arg(flag)
+                        .arg(&actual_command)
+                        .current_dir(&cwd)
+                        .status();
+
+                    match status {
+                        Ok(exit) => {
+                            if exit.success() {
+                                app.add_shell_output(format!("(completed successfully)"));
+                            } else {
+                                let msg = match exit.code() {
+                                    Some(code) => format!("(exited with code {})", code),
+                                    None => "(process terminated)".to_string(),
+                                };
+                                app.add_shell_output(msg);
                             }
                         }
-                        let stderr_text = String::from_utf8_lossy(&output.stderr);
-                        for line in stderr_text.lines() {
-                            let line = line.trim_end_matches('\r');
-                            if !line.is_empty() {
-                                app.add_shell_output(line.to_string());
-                            }
+                        Err(e) => {
+                            app.add_shell_output(format!("Error: {}", e));
                         }
                     }
-                    Err(e) => {
-                        app.add_shell_output(format!("Error: {}", e));
-                    }
-                }
 
-                app.left_panel.refresh();
-                app.right_panel.refresh();
+                    *terminal = setup_terminal()?;
 
-                // Inject into persistent shell history so the command
-                // is available via Up arrow in Ctrl+O mode.
-                if app.shell.is_none() {
-                    app.init_shell();
+                    // Refresh panels
+                    app.left_panel.refresh();
+                    app.right_panel.refresh();
+
+                    needs_redraw = true;
+                    continue;
                 }
-                if let Some(shell) = &mut app.shell {
-                    let _ = shell.inject_history(&actual_command, &cwd);
-                }
-                needs_redraw = true;
-                continue;
             }
 
             // ── Unix: run on real terminal with script for capture ──
@@ -794,6 +864,49 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             }
         }
 
+        // Check if we need to spawn an interactive shell
+        if let Mode::SpawnShell { cwd } = &app.mode {
+            let cwd = cwd.clone();
+            app.mode = Mode::Normal;
+
+            let shell = persistent_shell::resolve_shell(&app.config.general.shell);
+
+            restore_terminal()?;
+
+            let mut cmd = std::process::Command::new(&shell);
+            cmd.current_dir(&cwd);
+
+            // Fish 4.1+ sends a Device Attributes query that hangs in PTYs
+            // that don't respond.  Disable it.
+            if shell.to_lowercase().contains("fish") {
+                cmd.env("fish_features", "no-query-term");
+            }
+
+            match cmd.status() {
+                Ok(exit) => {
+                    if !exit.success() {
+                        let msg = match exit.code() {
+                            Some(code) => format!("(shell exited with code {})", code),
+                            None => "(shell terminated)".to_string(),
+                        };
+                        app.add_shell_output(msg);
+                    }
+                }
+                Err(e) => {
+                    app.add_shell_output(format!("Error spawning shell: {}", e));
+                }
+            }
+
+            *terminal = setup_terminal()?;
+
+            // Refresh panels (user may have changed files)
+            app.left_panel.refresh();
+            app.right_panel.refresh();
+
+            needs_redraw = true;
+            continue;
+        }
+
         // Check if we need to launch an external editor
         if let Mode::Editing { path, remote_info } = &app.mode {
             let path = path.clone();
@@ -863,6 +976,36 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             continue;
         }
 
+        // Check if a viewer plugin needs terminal access (e.g. hex editor).
+        // We run the command directly from Bark (not through the plugin
+        // process) so the editor inherits Bark's real terminal handles
+        // instead of piped stdin/stdout.  This is the same pattern as
+        // Mode::Editing (F4).
+        if let Mode::TerminalPlugin { path, .. } = &app.mode {
+            let path = path.clone();
+            app.mode = Mode::Normal;
+
+            let editor = app.config.editor.hex_editor.clone();
+            if !editor.is_empty() {
+                // Leave TUI so the editor gets a clean terminal
+                restore_terminal()?;
+
+                let _ = std::process::Command::new(&editor)
+                    .arg(&path)
+                    .status();
+
+                // Re-enter TUI
+                *terminal = setup_terminal()?;
+            }
+
+            // Open the built-in viewer on the (possibly modified) file
+            app.view_file(&path);
+            app.active_panel_mut().refresh();
+
+            needs_redraw = true;
+            continue;
+        }
+
         // Check if shell toggle is active (Ctrl+O) - interactive shell mode
         if matches!(app.mode, Mode::ShellVisible) {
 
@@ -877,7 +1020,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
             // Clear any stray content if not in command mode
             if !app.cmd.focused {
-                app.cmd.input.clear();
+                app.cmd.clear_input();
             }
 
             // Ensure we have a persistent shell
@@ -1099,14 +1242,35 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
         }
 
         if app.should_quit {
+            // Kill any running background command process tree
+            #[cfg(windows)]
+            if let Some(child_arc) = app.command_child.take() {
+                if let Ok(mut guard) = child_arc.lock() {
+                    if let Some(child) = guard.take() {
+                        let pid = child.id();
+                        drop(child);
+                        persistent_shell::kill_process_tree(pid);
+                    }
+                }
+            }
+            // Drop the background task so the thread is detached
+            app.background_task = None;
             // Save state before exiting
             app.save_state();
             // Remove lock file before shell shutdown — on Windows,
             // shutdown() calls process::exit() and never returns.
             remove_lock_file();
-            // Shut down the persistent shell
+            // Shut down the persistent shell (on Windows 11+ this
+            // calls process::exit and never returns).
             if let Some(shell) = app.shell.take() {
                 shell.shutdown();
+            }
+            // On Windows 10 there is no persistent shell, so
+            // shutdown() above is skipped.  Exit explicitly to
+            // ensure background threads don't keep the process alive.
+            #[cfg(windows)]
+            if persistent_shell::is_windows_10_or_older() {
+                std::process::exit(0);
             }
             break;
         }

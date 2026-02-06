@@ -635,6 +635,56 @@ fn kill_child_conhosts(parent_pid: u32) {
     }
 }
 
+/// Kill a process and all of its descendants (entire process tree).
+/// Uses a toolhelp32 snapshot to find children recursively.
+#[cfg(windows)]
+pub fn kill_process_tree(pid: u32) {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
+        TH32CS_SNAPPROCESS,
+    };
+
+    // Collect all descendant PIDs first (breadth-first).
+    let mut to_kill = vec![pid];
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap != INVALID_HANDLE_VALUE {
+            let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+
+            // Build a list of (pid, parent_pid) pairs
+            let mut all_procs = Vec::new();
+            if Process32First(snap, &mut entry) != 0 {
+                loop {
+                    all_procs.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                    if Process32Next(snap, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snap);
+
+            // Find all descendants
+            let mut i = 0;
+            while i < to_kill.len() {
+                let parent = to_kill[i];
+                for &(child_pid, parent_pid) in &all_procs {
+                    if parent_pid == parent && !to_kill.contains(&child_pid) {
+                        to_kill.push(child_pid);
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+
+    // Kill in reverse order (children first, then parent)
+    for &kill_pid in to_kill.iter().rev() {
+        terminate_process_by_pid(kill_pid);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper functions (moved from main.rs)
 // ---------------------------------------------------------------------------

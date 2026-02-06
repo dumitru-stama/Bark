@@ -15,6 +15,7 @@ pub mod cp437;
 pub mod viewer_utils;
 
 pub use dialog::ConfirmDialog;
+pub use dialog::DeleteIterativeDialog;
 pub use dialog::SimpleConfirmDialog;
 pub use dialog::SourceSelector;
 pub use dialog::MkdirDialog;
@@ -40,3 +41,7 @@ pub use viewer_menu::ViewerPluginMenu;
 pub use dialog::OverwriteConfirmDialog;
 pub use spinner::SpinnerDialog;
 pub use spinner::FileOpProgressDialog;
+#[cfg(not(windows))]
+pub use dialog::EditPermissionsDialog;
+#[cfg(not(windows))]
+pub use dialog::EditOwnerDialog;

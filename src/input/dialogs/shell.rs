@@ -107,11 +107,8 @@ pub fn handle_command_history_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             if let Some(cmd) = app.cmd.history.get(*selected).cloned() {
                 app.mode = Mode::Normal;
-                let cwd = match app.active_panel {
-                    crate::state::Side::Left => app.left_panel.path.clone(),
-                    crate::state::Side::Right => app.right_panel.path.clone(),
-                };
-                app.mode = Mode::RunningCommand { command: cmd, cwd };
+                app.cmd.set_input(cmd);
+                app.cmd.focused = true;
             }
         }
 

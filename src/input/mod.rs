@@ -41,12 +41,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         }
         Mode::Editing { .. } => {} // Handled in main loop
         Mode::RunningCommand { .. } => {} // Handled in main loop
+        Mode::SpawnShell { .. } => {} // Handled in main loop
+        Mode::TerminalPlugin { .. } => {} // Handled in main loop
         Mode::ShellVisible => dialogs::handle_shell_mode(app, key),
         Mode::ShellHistoryView { .. } => {
             let height = app.ui.viewer_height;
             dialogs::handle_shell_history_view(app, key, height);
         }
         Mode::Confirming { .. } => dialogs::handle_confirming_mode(app, key),
+        Mode::DeleteIterative { .. } => dialogs::handle_delete_iterative_mode(app, key),
         Mode::SimpleConfirm { .. } => dialogs::handle_simple_confirm_mode(app, key),
         Mode::ScpPasswordPrompt { .. } => dialogs::handle_scp_password_prompt_mode(app, key),
         Mode::SourceSelector { .. } => dialogs::handle_source_selector_mode(app, key),
@@ -60,6 +63,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::UserMenuEdit { .. } => dialogs::handle_user_menu_edit_mode(app, key),
         Mode::ArchivePasswordPrompt { .. } => dialogs::handle_archive_password_prompt_mode(app, key),
         Mode::OverwriteConfirm { .. } => dialogs::handle_overwrite_confirm_mode(app, key),
+        #[cfg(not(windows))]
+        Mode::EditingPermissions { .. } => dialogs::handle_permissions_mode(app, key),
+        #[cfg(not(windows))]
+        Mode::EditingOwner { .. } => dialogs::handle_owner_mode(app, key),
         Mode::FileOpProgress { .. } => {
             // During file operations, Escape cancels
             if key.code == KeyCode::Esc {
@@ -71,7 +78,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             if key.code == KeyCode::Esc {
                 app.cancel_background_task();
             }
-            // Other keys ignored while task is running
+            // F10 / quit exits the app (kill child + quit)
+            if app.key_matches("quit", &key) || app.key_matches("quit_alt", &key) {
+                app.cancel_background_task();
+                app.should_quit = true;
+            }
         }
     }
 }
