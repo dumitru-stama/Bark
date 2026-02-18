@@ -18,6 +18,7 @@ use super::Theme;
 pub struct StatusBar<'a> {
     panel: &'a Panel,
     git_status: Option<&'a GitStatus>,
+    python_env: Option<&'a str>,
     quick_search: Option<&'a str>,
     plugin_status: Option<&'a [(String, String)]>,
     theme: &'a Theme,
@@ -25,11 +26,16 @@ pub struct StatusBar<'a> {
 
 impl<'a> StatusBar<'a> {
     pub fn new(panel: &'a Panel, theme: &'a Theme) -> Self {
-        Self { panel, git_status: None, quick_search: None, plugin_status: None, theme }
+        Self { panel, git_status: None, python_env: None, quick_search: None, plugin_status: None, theme }
     }
 
     pub fn with_git(mut self, git_status: Option<&'a GitStatus>) -> Self {
         self.git_status = git_status;
+        self
+    }
+
+    pub fn with_python_env(mut self, python_env: Option<&'a String>) -> Self {
+        self.python_env = python_env.map(|s| s.as_str());
         self
     }
 
@@ -72,6 +78,7 @@ impl Widget for StatusBar<'_> {
         }
 
         // Render git status (after quick search if present)
+        let mut has_left_info = false;
         if let Some(git) = self.git_status {
             let git_str = git.format();
             if !git_str.is_empty() {
@@ -94,7 +101,24 @@ impl Widget for StatusBar<'_> {
                 let display = format!(" {} ", git_str);
                 buf.set_string(area.x + x_offset, area.y, &display, actual_style);
                 x_offset += display.len() as u16;
+                has_left_info = true;
             }
+        }
+
+        // Render Python env (after git status, separated by bullet)
+        if let Some(env_name) = self.python_env {
+            let py_style = Style::default()
+                .bg(self.theme.status_bg)
+                .fg(self.theme.status_python_env)
+                .add_modifier(Modifier::BOLD);
+
+            let display = if has_left_info {
+                format!("\u{2022} env: {} ", env_name)
+            } else {
+                format!(" env: {} ", env_name)
+            };
+            buf.set_string(area.x + x_offset, area.y, &display, py_style);
+            x_offset += display.chars().count() as u16;
         }
 
         // Calculate plugin width (will be rendered on the right)

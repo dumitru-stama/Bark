@@ -7,10 +7,13 @@
 
 mod api;
 mod manager;
+pub mod overlay_script;
 pub mod provider_api;
 pub mod provider_script;
 mod script;
 
+#[allow(unused_imports)]
+pub use api::{OverlayPluginInfo, OverlayRenderResult};
 pub use api::{StatusContext, ViewerContext};
 pub use manager::PluginManager;
 

@@ -44,6 +44,10 @@ pub struct App {
     /// Path for which right git status was computed
     right_git_path: Option<PathBuf>,
 
+    // === Python environment ===
+    /// Detected Python virtual environment name (venv, conda, pyenv)
+    pub python_env: Option<String>,
+
     // === Configuration ===
     /// Application configuration
     pub config: Config,
@@ -70,6 +74,10 @@ pub struct App {
     // === Persistent shell ===
     /// Persistent PTY shell (lives for app lifetime)
     pub shell: Option<PersistentShell>,
+
+    // === Overlay plugins ===
+    /// Active overlay plugin session (if any)
+    pub overlay_session: Option<crate::plugins::overlay_script::ScriptOverlaySession>,
 }
 
 impl App {
@@ -179,6 +187,9 @@ impl App {
         let left_git = git::get_git_status(&left_path);
         let right_git = git::get_git_status(&right_path);
 
+        // Detect Python virtual environment
+        let python_env = detect_python_env_for_dir(&left_path);
+
         // Build theme from config
         let theme = config.theme.build_theme();
 
@@ -208,6 +219,7 @@ impl App {
             right_git_status: right_git,
             left_git_path: Some(left_path),
             right_git_path: Some(right_path),
+            python_env,
             config,
             theme,
             plugins,
@@ -218,6 +230,7 @@ impl App {
             #[cfg(windows)]
             command_child: None,
             shell: None,
+            overlay_session: None,
         }
     }
 
@@ -314,18 +327,31 @@ impl App {
     // GIT STATUS
     // ========================================================================
 
-    /// Update git status for panels if their paths changed
+    /// Update git status and python env for panels if their paths changed
     pub fn update_git_status(&mut self) {
+        let mut path_changed = false;
+
         // Update left panel git status if path changed
         if self.left_git_path.as_ref() != Some(&self.left_panel.path) {
             self.left_git_status = git::get_git_status(&self.left_panel.path);
             self.left_git_path = Some(self.left_panel.path.clone());
+            path_changed = true;
         }
 
         // Update right panel git status if path changed
         if self.right_git_path.as_ref() != Some(&self.right_panel.path) {
             self.right_git_status = git::get_git_status(&self.right_panel.path);
             self.right_git_path = Some(self.right_panel.path.clone());
+            path_changed = true;
+        }
+
+        // Update python env when active panel path changed
+        if path_changed {
+            let path = match self.active_panel {
+                Side::Left => &self.left_panel.path,
+                Side::Right => &self.right_panel.path,
+            };
+            self.python_env = detect_python_env_for_dir(path);
         }
     }
 
@@ -333,6 +359,87 @@ impl App {
     pub fn refresh_git_status(&mut self) {
         self.left_git_status = git::get_git_status(&self.left_panel.path);
         self.right_git_status = git::get_git_status(&self.right_panel.path);
+    }
+
+    /// Force refresh all status indicators (git + python env)
+    pub fn refresh_status_indicators(&mut self) {
+        self.refresh_git_status();
+        let path = match self.active_panel {
+            Side::Left => &self.left_panel.path,
+            Side::Right => &self.right_panel.path,
+        };
+        self.python_env = detect_python_env_for_dir(path);
+    }
+
+    /// Detect env activation commands (conda activate, source activate, etc.)
+    /// and sync them to the persistent shell + update the status bar.
+    /// TUI commands run in child processes that exit immediately, so env
+    /// changes are lost. This forwards them to the persistent shell.
+    pub fn sync_env_command(&mut self, command: &str) {
+        let trimmed = command.trim();
+
+        // conda activate <name>
+        if let Some(rest) = trimmed.strip_prefix("conda activate") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                self.python_env = Some(name.to_string());
+                if let Some(shell) = &mut self.shell {
+                    let _ = shell.send_command(trimmed);
+                }
+                return;
+            }
+        }
+
+        // conda deactivate
+        if trimmed == "conda deactivate" {
+            if let Some(shell) = &mut self.shell {
+                let _ = shell.send_command(trimmed);
+            }
+            // Re-detect from filesystem after deactivation
+            let path = match self.active_panel {
+                Side::Left => &self.left_panel.path,
+                Side::Right => &self.right_panel.path,
+            };
+            self.python_env = detect_python_env_for_dir(path);
+            return;
+        }
+
+        // source <path>/activate  or  . <path>/activate  (venv activation)
+        let source_arg = if let Some(rest) = trimmed.strip_prefix("source ") {
+            Some(rest.trim())
+        } else if let Some(rest) = trimmed.strip_prefix(". ") {
+            Some(rest.trim())
+        } else {
+            None
+        };
+        if let Some(arg) = source_arg {
+            if arg.ends_with("/activate") || arg.ends_with("/activate\"") || arg.ends_with("/activate'") {
+                // Extract venv name from path (e.g., ".venv/bin/activate" → ".venv")
+                let clean = arg.trim_matches(|c| c == '\'' || c == '"');
+                if let Some(venv_dir) = std::path::Path::new(clean).parent().and_then(|p| p.parent()) {
+                    let name = venv_dir.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| clean.to_string());
+                    self.python_env = Some(name);
+                }
+                if let Some(shell) = &mut self.shell {
+                    let _ = shell.send_command(trimmed);
+                }
+                return;
+            }
+        }
+
+        // deactivate (venv)
+        if trimmed == "deactivate" {
+            if let Some(shell) = &mut self.shell {
+                let _ = shell.send_command(trimmed);
+            }
+            let path = match self.active_panel {
+                Side::Left => &self.left_panel.path,
+                Side::Right => &self.right_panel.path,
+            };
+            self.python_env = detect_python_env_for_dir(path);
+        }
     }
 
     // ========================================================================
@@ -388,6 +495,15 @@ impl App {
             "quit",
             "exit",
             "q",
+            "sort_name_asc",
+            "sort_name_desc",
+            "sort_ext_asc",
+            "sort_ext_desc",
+            "sort_time_asc",
+            "sort_time_desc",
+            "sort_size_asc",
+            "sort_size_desc",
+            "overlay",
         ]
     }
 
@@ -752,6 +868,40 @@ impl App {
                 Some(String::new())
             }
 
+            // Directional sort commands
+            "sort_name_asc" => {
+                self.active_panel_mut().set_sort_directed(SortField::Name, SortDirection::Ascending);
+                Some("Sorted by name (ascending)".to_string())
+            }
+            "sort_name_desc" => {
+                self.active_panel_mut().set_sort_directed(SortField::Name, SortDirection::Descending);
+                Some("Sorted by name (descending)".to_string())
+            }
+            "sort_ext_asc" => {
+                self.active_panel_mut().set_sort_directed(SortField::Extension, SortDirection::Ascending);
+                Some("Sorted by extension (ascending)".to_string())
+            }
+            "sort_ext_desc" => {
+                self.active_panel_mut().set_sort_directed(SortField::Extension, SortDirection::Descending);
+                Some("Sorted by extension (descending)".to_string())
+            }
+            "sort_time_asc" => {
+                self.active_panel_mut().set_sort_directed(SortField::Modified, SortDirection::Ascending);
+                Some("Sorted by time (ascending)".to_string())
+            }
+            "sort_time_desc" => {
+                self.active_panel_mut().set_sort_directed(SortField::Modified, SortDirection::Descending);
+                Some("Sorted by time (descending)".to_string())
+            }
+            "sort_size_asc" => {
+                self.active_panel_mut().set_sort_directed(SortField::Size, SortDirection::Ascending);
+                Some("Sorted by size (ascending)".to_string())
+            }
+            "sort_size_desc" => {
+                self.active_panel_mut().set_sort_directed(SortField::Size, SortDirection::Descending);
+                Some("Sorted by size (descending)".to_string())
+            }
+
             // Quit
             "q" | "quit" | "exit" => {
                 self.should_quit = true;
@@ -881,6 +1031,16 @@ impl App {
                         Err(e) => Some(format!("touch: {}: {}", args, e)),
                     }
                 }
+            }
+
+            // Overlay plugins
+            "overlay" => {
+                if args.is_empty() {
+                    self.show_overlay_plugins();
+                } else {
+                    self.launch_overlay_plugin(args);
+                }
+                Some(String::new())
             }
 
             _ => None, // Not a built-in command
@@ -1030,6 +1190,39 @@ impl App {
                 };
                 self.config.display.show_git_status = new_val;
                 format!("show_git_status = {}", new_val)
+            }
+
+            "python_env" | "show_python_env" => {
+                let new_val = match value {
+                    Some("true") | Some("1") | Some("on") | Some("yes") => true,
+                    Some("false") | Some("0") | Some("off") | Some("no") => false,
+                    None => !self.config.display.show_python_env, // Toggle
+                    _ => return format!("Invalid value for {}: use true/false", option),
+                };
+                self.config.display.show_python_env = new_val;
+                format!("show_python_env = {}", new_val)
+            }
+
+            "show_date" => {
+                let new_val = match value {
+                    Some("true") | Some("1") | Some("on") | Some("yes") => true,
+                    Some("false") | Some("0") | Some("off") | Some("no") => false,
+                    None => !self.config.display.show_date,
+                    _ => return format!("Invalid value for {}: use true/false", option),
+                };
+                self.config.display.show_date = new_val;
+                format!("show_date = {}", new_val)
+            }
+
+            "show_time" => {
+                let new_val = match value {
+                    Some("true") | Some("1") | Some("on") | Some("yes") => true,
+                    Some("false") | Some("0") | Some("off") | Some("no") => false,
+                    None => !self.config.display.show_time,
+                    _ => return format!("Invalid value for {}: use true/false", option),
+                };
+                self.config.display.show_time = new_val;
+                format!("show_time = {}", new_val)
             }
 
             "dir_prefix" | "show_dir_prefix" => {
@@ -3893,6 +4086,143 @@ impl App {
 }
 
 // ============================================================================
+// OVERLAY PLUGINS
+// ============================================================================
+
+impl App {
+    /// Show overlay plugin selector or launch directly if only one
+    pub fn show_overlay_plugins(&mut self) {
+        let plugins = self.plugins.list_overlay_plugins();
+        if plugins.is_empty() {
+            self.add_shell_output("No overlay plugins installed".to_string());
+            return;
+        }
+        if plugins.len() == 1 {
+            let name = plugins[0].0.clone();
+            self.launch_overlay_plugin(&name);
+            return;
+        }
+        self.mode = Mode::OverlaySelector {
+            plugins,
+            selected: 0,
+        };
+    }
+
+    /// Launch a specific overlay plugin by name
+    pub fn launch_overlay_plugin(&mut self, name: &str) {
+        use crate::plugins::overlay_script::ScriptOverlayPlugin;
+
+        let (info, exe) = match self.plugins.find_overlay_by_name(name) {
+            Some(found) => (found.0.clone(), found.1.clone()),
+            None => {
+                self.add_shell_output(format!("Overlay plugin '{}' not found", name));
+                return;
+            }
+        };
+
+        let plugin = ScriptOverlayPlugin {
+            info: info.clone(),
+            executable: exe,
+        };
+
+        match plugin.start_session() {
+            Ok(session) => {
+                match session.init(info.width, info.height) {
+                    Ok(result) => {
+                        if result.close {
+                            // Plugin wants to close immediately
+                            drop(session);
+                            return;
+                        }
+                        self.mode = Mode::Overlay {
+                            plugin_name: info.name.clone(),
+                            lines: result.lines,
+                            title: result.title,
+                            width: result.width,
+                            height: result.height,
+                            tick: result.tick,
+                        };
+                        self.overlay_session = Some(session);
+                    }
+                    Err(e) => {
+                        self.add_shell_output(format!("Overlay init failed: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                self.add_shell_output(format!("Failed to start overlay: {}", e));
+            }
+        }
+    }
+
+    /// Send a key event to the active overlay session
+    pub fn overlay_send_key(&mut self, key: &str, modifiers: &[&str]) {
+        if let Some(session) = &self.overlay_session {
+            match session.send_key(key, modifiers) {
+                Ok(result) => {
+                    if result.close {
+                        self.close_overlay();
+                        return;
+                    }
+                    self.mode = Mode::Overlay {
+                        plugin_name: if let Mode::Overlay { ref plugin_name, .. } = self.mode {
+                            plugin_name.clone()
+                        } else {
+                            String::new()
+                        },
+                        lines: result.lines,
+                        title: result.title,
+                        width: result.width,
+                        height: result.height,
+                        tick: result.tick,
+                    };
+                }
+                Err(_) => {
+                    self.close_overlay();
+                }
+            }
+        }
+    }
+
+    /// Close the active overlay session
+    pub fn close_overlay(&mut self) {
+        if let Some(mut session) = self.overlay_session.take() {
+            session.close();
+        }
+        self.mode = Mode::Normal;
+    }
+
+    /// Send a tick to the active overlay session (called periodically for live updates)
+    pub fn overlay_tick(&mut self) {
+        if let Some(session) = &self.overlay_session {
+            match session.tick() {
+                Ok(result) => {
+                    if result.close {
+                        self.close_overlay();
+                        return;
+                    }
+                    self.mode = Mode::Overlay {
+                        plugin_name: if let Mode::Overlay { ref plugin_name, .. } = self.mode {
+                            plugin_name.clone()
+                        } else {
+                            String::new()
+                        },
+                        lines: result.lines,
+                        title: result.title,
+                        width: result.width,
+                        height: result.height,
+                        tick: result.tick,
+                    };
+                }
+                Err(_) => {
+                    self.close_overlay();
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // BACKGROUND TASKS
 // ============================================================================
 
@@ -4109,6 +4439,14 @@ impl App {
 
     /// Poll file operation progress and update mode state
     pub fn poll_file_operation(&mut self) {
+        // Check for errors from the worker thread first
+        self.poll_file_op_error();
+
+        // Don't update progress if we're showing an error dialog
+        if matches!(self.mode, Mode::FileOpErrorDialog { .. }) {
+            return;
+        }
+
         // Drain progress channel for the latest update
         if let Some(task) = &self.background_task {
             if let Some(progress_rx) = &task.progress_rx {
@@ -4132,6 +4470,70 @@ impl App {
 
         // Check if the operation has completed
         self.poll_background_task();
+    }
+
+    /// Check if the worker thread has sent an error for user interaction
+    fn poll_file_op_error(&mut self) {
+        let error = self.background_task.as_ref().and_then(|task| {
+            task.error_rx.as_ref().and_then(|rx| rx.try_recv().ok())
+        });
+
+        if let Some(error) = error {
+            // Capture current progress state before switching to error dialog
+            if let Mode::FileOpProgress {
+                title, bytes_done, bytes_total, current_file,
+                files_done, files_total, frame,
+            } = &self.mode {
+                self.mode = Mode::FileOpErrorDialog {
+                    file_path: error.file_path,
+                    error_message: error.error_message,
+                    focus: 0,
+                    saved_title: title.clone(),
+                    saved_bytes_done: *bytes_done,
+                    saved_bytes_total: *bytes_total,
+                    saved_current_file: current_file.clone(),
+                    saved_files_done: *files_done,
+                    saved_files_total: *files_total,
+                    saved_frame: *frame,
+                };
+            }
+        }
+    }
+
+    /// Send the user's response to a file operation error back to the worker thread
+    pub fn respond_to_file_op_error(&mut self, response: super::background::FileOpErrorResponse) {
+        use super::background::FileOpErrorResponse;
+
+        // For Abort, also set the cancel token to stop any further processing
+        if matches!(response, FileOpErrorResponse::Abort) {
+            if let Some(cancel) = &self.cancel_token {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        // Send the response to the worker thread
+        if let Some(task) = &self.background_task {
+            if let Some(tx) = &task.error_response_tx {
+                let _ = tx.send(response);
+            }
+        }
+
+        // Restore the progress dialog
+        if let Mode::FileOpErrorDialog {
+            saved_title, saved_bytes_done, saved_bytes_total,
+            saved_current_file, saved_files_done, saved_files_total,
+            saved_frame, ..
+        } = &self.mode {
+            self.mode = Mode::FileOpProgress {
+                title: saved_title.clone(),
+                bytes_done: *saved_bytes_done,
+                bytes_total: *saved_bytes_total,
+                current_file: saved_current_file.clone(),
+                files_done: *saved_files_done,
+                files_total: *saved_files_total,
+                frame: *saved_frame,
+            };
+        }
     }
 
     /// Cancel a running file operation
@@ -4176,5 +4578,77 @@ fn has_external_command(cmd: &str) -> bool {
         }
     }
     false
+}
+
+/// Detect Python virtual environment.
+///
+/// 1. Check env vars (VIRTUAL_ENV, CONDA_DEFAULT_ENV, PYENV_VERSION) — works
+///    when Bark is launched from within an active venv.
+/// 2. Scan `dir` and its parents for directories containing `pyvenv.cfg` —
+///    works regardless of activation state (detects .venv, venv, .env, env).
+fn detect_python_env_for_dir(dir: &std::path::Path) -> Option<String> {
+    // Environment variables (set when Bark itself runs inside a venv)
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let name = std::path::Path::new(&venv)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or(venv);
+        return Some(name);
+    }
+    if let Ok(conda) = std::env::var("CONDA_DEFAULT_ENV") {
+        if !conda.is_empty() {
+            return Some(conda);
+        }
+    }
+    if let Ok(pyenv) = std::env::var("PYENV_VERSION") {
+        if !pyenv.is_empty() {
+            return Some(pyenv);
+        }
+    }
+
+    // Filesystem scan: walk up from dir looking for venv/conda markers
+    let mut current = Some(dir);
+    while let Some(d) = current {
+        // Check for venv directories (pyvenv.cfg is the standard marker)
+        for name in &[".venv", "venv", ".env", "env"] {
+            let candidate = d.join(name);
+            if candidate.join("pyvenv.cfg").exists() {
+                return Some(name.to_string());
+            }
+        }
+
+        // Check for conda environment.yml (name: field specifies the env)
+        let env_yml = d.join("environment.yml");
+        if env_yml.exists() {
+            if let Some(name) = parse_conda_env_name(&env_yml) {
+                return Some(name);
+            }
+        }
+        let env_yaml = d.join("environment.yaml");
+        if env_yaml.exists() {
+            if let Some(name) = parse_conda_env_name(&env_yaml) {
+                return Some(name);
+            }
+        }
+
+        current = d.parent();
+    }
+
+    None
+}
+
+/// Extract the `name:` field from a conda environment.yml file.
+fn parse_conda_env_name(path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("name:") {
+            let name = rest.trim().trim_matches('"').trim_matches('\'');
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 

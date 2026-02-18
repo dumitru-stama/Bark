@@ -413,6 +413,55 @@ pub fn handle_overwrite_confirm_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
+pub fn handle_file_op_error_mode(app: &mut App, key: KeyEvent) {
+    use crate::state::background::FileOpErrorResponse;
+
+    let Mode::FileOpErrorDialog { focus, .. } = &mut app.mode else {
+        return;
+    };
+
+    let button_count = 4; // Retry, Skip, SkipAll, Abort
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('a') | KeyCode::Char('A') => {
+            app.respond_to_file_op_error(FileOpErrorResponse::Abort);
+        }
+
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            app.respond_to_file_op_error(FileOpErrorResponse::Retry);
+        }
+
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            app.respond_to_file_op_error(FileOpErrorResponse::Skip);
+        }
+
+        KeyCode::Char('k') | KeyCode::Char('K') => {
+            app.respond_to_file_op_error(FileOpErrorResponse::SkipAll);
+        }
+
+        KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+            *focus = (*focus + 1) % button_count;
+        }
+
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+            *focus = if *focus == 0 { button_count - 1 } else { *focus - 1 };
+        }
+
+        KeyCode::Enter => {
+            let response = match *focus {
+                0 => FileOpErrorResponse::Retry,
+                1 => FileOpErrorResponse::Skip,
+                2 => FileOpErrorResponse::SkipAll,
+                3 => FileOpErrorResponse::Abort,
+                _ => return,
+            };
+            app.respond_to_file_op_error(response);
+        }
+
+        _ => {}
+    }
+}
+
 pub fn handle_simple_confirm_mode(app: &mut App, key: KeyEvent) {
     let Mode::SimpleConfirm { action, focus, .. } = &mut app.mode else {
         return;

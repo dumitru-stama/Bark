@@ -36,7 +36,7 @@ mod win_console;
 use state::app::App;
 use state::mode::Mode;
 use state::Side;
-use ui::{ArchivePasswordPromptDialog, CommandHistoryDialog, ConfirmDialog, DeleteIterativeDialog, SimpleConfirmDialog, SourceSelector, FileViewer, FindFilesDialog, HelpViewer, MkdirDialog, OverwriteConfirmDialog, PanelWidget, PluginViewer, ScpConnectDialog, ScpPasswordPromptDialog, SelectFilesDialog, ShellArea, ShellHistoryViewer, SpinnerDialog, StatusBar, ViewerPluginMenu, ViewerSearchDialog, UserMenuDialog, UserMenuEditDialog, FileOpProgressDialog};
+use ui::{ArchivePasswordPromptDialog, CommandHistoryDialog, ConfirmDialog, DeleteIterativeDialog, SimpleConfirmDialog, SourceSelector, FileViewer, FindFilesDialog, HelpViewer, MkdirDialog, OverlayDialog, OverlaySelectorDialog, OverwriteConfirmDialog, PanelWidget, PluginViewer, ScpConnectDialog, ScpPasswordPromptDialog, SelectFilesDialog, ShellArea, ShellHistoryViewer, SpinnerDialog, StatusBar, ViewerPluginMenu, ViewerSearchDialog, UserMenuDialog, UserMenuEditDialog, FileOpProgressDialog, FileOpErrorDialog};
 use ui::dialog::{archive_password_prompt_cursor_position, dialog_cursor_position, mkdir_cursor_position, find_files_pattern_cursor_position, find_files_content_cursor_position, find_files_path_cursor_position, viewer_search_text_cursor_position, viewer_search_hex_cursor_position, select_files_cursor_position, scp_connect_cursor_position, scp_password_prompt_cursor_position, user_menu_edit_cursor_position, PluginConnectDialog, plugin_connect_cursor_position};
 use input::get_help_text;
 
@@ -216,6 +216,30 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         .with_dir_sizes(&app.dir_sizes);
                     frame.render_stateful_widget(right_widget, panel_chunks[1], &mut app.right_panel);
 
+                    // Draw date/time on right panel's top border (right-aligned)
+                    if app.config.display.show_date || app.config.display.show_time {
+                        let (wday, month, day, hour, minute) = local_datetime_now();
+                        let mut parts = Vec::new();
+                        if app.config.display.show_date {
+                            parts.push(format!("{}, {} {}", day_of_week_name(wday), month_name(month), day));
+                        }
+                        if app.config.display.show_time {
+                            parts.push(format!("{:02}:{:02}", hour, minute));
+                        }
+                        let clock_str = format!(" {} ", parts.join(" \u{2022} "));
+                        let clock_len = clock_str.len() as u16;
+                        let right_area = panel_chunks[1];
+                        if right_area.width > clock_len + 2 {
+                            let clock_x = right_area.x + right_area.width - clock_len - 1;
+                            let clock_y = right_area.y;
+                            let clock_style = Style::default()
+                                .fg(app.theme.panel_border_inactive)
+                                .bg(app.theme.panel_background);
+                            let buf = frame.buffer_mut();
+                            buf.set_string(clock_x, clock_y, &clock_str, clock_style);
+                        }
+                    }
+
                     // Draw quick search box overlaid on active panel's bottom border
                     if let Some(ref search) = app.quick_search {
                         let search_style = Style::default()
@@ -255,8 +279,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                     } else {
                         Some(&plugin_status)
                     };
+                    let python_env_for_status = if app.config.display.show_python_env {
+                        app.python_env.as_ref()
+                    } else {
+                        None
+                    };
                     let status_bar = StatusBar::new(active_panel, &app.theme)
                         .with_git(git_for_status)
+                        .with_python_env(python_env_for_status)
                         .with_plugin_status(plugin_status_ref);
                     frame.render_widget(status_bar, main_chunks[1]);
 
@@ -613,6 +643,24 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         frame.render_widget(dialog, size);
                     }
 
+                    // Render file operation error dialog (overlay on top of frozen progress)
+                    if let Mode::FileOpErrorDialog {
+                        file_path, error_message, focus,
+                        saved_title, saved_bytes_done, saved_bytes_total,
+                        saved_current_file, saved_files_done, saved_files_total,
+                        saved_frame,
+                    } = &app.mode {
+                        // Render the progress dialog underneath (frozen state)
+                        let progress = FileOpProgressDialog::new(
+                            saved_frame % 10, saved_title, saved_current_file,
+                            *saved_bytes_done, *saved_bytes_total, *saved_files_done, *saved_files_total, &app.theme,
+                        );
+                        frame.render_widget(progress, size);
+                        // Render the error dialog on top
+                        let error_dialog = FileOpErrorDialog::new(file_path, error_message, *focus, &app.theme);
+                        frame.render_widget(error_dialog, size);
+                    }
+
                     // Render permissions dialog (Unix only)
                     #[cfg(not(windows))]
                     if let Mode::EditingPermissions {
@@ -651,6 +699,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                             *group_selected, *group_scroll,
                             *apply_recursive, *has_dirs, *focus, &app.theme,
                         );
+                        frame.render_widget(dialog, size);
+                    }
+
+                    // Render overlay plugin dialog
+                    if let Mode::Overlay { lines, title, width, height, .. } = &app.mode {
+                        let dialog = OverlayDialog::new(lines, title, *width, *height, &app.theme);
+                        frame.render_widget(dialog, size);
+                    }
+
+                    // Render overlay plugin selector dialog
+                    if let Mode::OverlaySelector { plugins, selected } = &app.mode {
+                        let dialog = OverlaySelectorDialog::new(plugins, *selected, &app.theme);
                         frame.render_widget(dialog, size);
                     }
 
@@ -750,9 +810,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
                     *terminal = setup_terminal()?;
 
-                    // Refresh panels
+                    // Refresh panels and status indicators
                     app.left_panel.refresh();
                     app.right_panel.refresh();
+                    app.refresh_status_indicators();
+                    // Sync env activation commands to persistent shell
+                    app.sync_env_command(&actual_command);
 
                     needs_redraw = true;
                     continue;
@@ -855,9 +918,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
                 *terminal = setup_terminal()?;
 
-                // Refresh panels
+                // Refresh panels and status indicators
                 app.left_panel.refresh();
                 app.right_panel.refresh();
+                app.refresh_status_indicators();
+                // Sync env activation commands to persistent shell
+                app.sync_env_command(&actual_command);
 
                 needs_redraw = true;
                 continue;
@@ -899,9 +965,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
             *terminal = setup_terminal()?;
 
-            // Refresh panels (user may have changed files)
+            // Refresh panels and status indicators (user may have changed files)
             app.left_panel.refresh();
             app.right_panel.refresh();
+            app.refresh_status_indicators();
 
             needs_redraw = true;
             continue;
@@ -1197,33 +1264,88 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
             app.mode = Mode::Normal;
             app.cmd.focused = false;
 
-            // Refresh panels in case filesystem changed
+            // Refresh panels and status indicators in case filesystem changed
             app.left_panel.refresh();
             app.right_panel.refresh();
+            app.refresh_status_indicators();
+
+            // Probe persistent shell for env changes (conda activate, etc.)
+            // Runs AFTER refresh_status_indicators() so it can override
+            // filesystem-based detection with the shell's actual env.
+            #[cfg(unix)]
+            if let Some(shell) = &mut app.shell {
+                let probe_file = format!("/tmp/bark_env_probe_{}", std::process::id());
+                // Use shell-portable syntax (fish doesn't support ${VAR:-})
+                let probe_cmd = format!(
+                    " echo $CONDA_DEFAULT_ENV > {f}; echo $VIRTUAL_ENV >> {f}\n",
+                    f = probe_file
+                );
+                let _ = shell.write_bytes(probe_cmd.as_bytes());
+                // Wait for shell to execute; retry up to 500ms
+                let probe_path = std::path::Path::new(&probe_file);
+                let mut content = String::new();
+                for _ in 0..5 {
+                    std::thread::sleep(Duration::from_millis(100));
+                    if probe_path.exists() {
+                        content = std::fs::read_to_string(&probe_file).unwrap_or_default();
+                        break;
+                    }
+                }
+                if !content.is_empty() {
+                    let lines: Vec<&str> = content.lines().collect();
+                    let conda = lines.first().map(|s| s.trim()).unwrap_or("");
+                    let venv = lines.get(1).map(|s| s.trim()).unwrap_or("");
+                    if !venv.is_empty() {
+                        let name = std::path::Path::new(venv)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| venv.to_string());
+                        app.python_env = Some(name);
+                    } else if !conda.is_empty() {
+                        app.python_env = Some(conda.to_string());
+                    }
+                }
+                let _ = std::fs::remove_file(&probe_file);
+                // Drain probe output so it doesn't appear in shell history
+                while shell.receiver.try_recv().is_ok() {}
+            }
 
             needs_redraw = true;
             continue;
         }
 
+        // Tick overlay plugins that request periodic updates (e.g. stopwatch)
+        let has_overlay_tick = matches!(app.mode, Mode::Overlay { tick: true, .. });
+        if has_overlay_tick {
+            app.overlay_tick();
+            needs_redraw = true;
+        }
+
         // Poll for background task completion and tick spinner
-        let has_animation = matches!(app.mode, Mode::BackgroundTask { .. } | Mode::FileOpProgress { .. });
+        let has_animation = matches!(app.mode, Mode::BackgroundTask { .. } | Mode::FileOpProgress { .. } | Mode::FileOpErrorDialog { .. });
         if matches!(app.mode, Mode::BackgroundTask { .. }) {
             app.poll_background_task();
             app.tick_spinner();
             needs_redraw = true;
         }
 
-        // Poll file operation progress
-        if matches!(app.mode, Mode::FileOpProgress { .. }) {
+        // Poll file operation progress (also checks for errors from worker thread)
+        if matches!(app.mode, Mode::FileOpProgress { .. } | Mode::FileOpErrorDialog { .. }) {
             app.poll_file_operation();
             app.tick_spinner();
             needs_redraw = true;
         }
 
-        // Use shorter poll timeout for animations (spinner),
-        // otherwise block until an event arrives.
+        // Use shorter poll timeout for animations (spinner).
+        // When the clock is visible, cap at 30s so the minute display stays fresh.
+        // Otherwise block until an event arrives.
+        let has_clock = app.config.display.show_date || app.config.display.show_time;
         let poll_timeout = if has_animation {
             Duration::from_millis(50)
+        } else if has_overlay_tick {
+            Duration::from_millis(100)
+        } else if has_clock {
+            Duration::from_secs(30)
         } else {
             Duration::from_secs(5)
         };
@@ -1233,12 +1355,29 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     input::handle_key(app, key);
                     needs_redraw = true;
+
+                    // Drain any remaining key events before redrawing.
+                    // This prevents input lag during fast key repeat: without
+                    // this, each buffered keypress triggers a full render before
+                    // the next is read, causing visible "scroll after key release".
+                    while event::poll(Duration::ZERO)? {
+                        match event::read()? {
+                            Event::Key(k) if k.kind == KeyEventKind::Press => {
+                                input::handle_key(app, k);
+                            }
+                            Event::Resize(_, _) => {}
+                            _ => {}
+                        }
+                    }
                 }
                 Event::Resize(_, _) => {
                     needs_redraw = true;
                 }
                 _ => {}
             }
+        } else if has_clock {
+            // Poll timed out — redraw to keep the clock current
+            needs_redraw = true;
         }
 
         if app.should_quit {
@@ -1278,12 +1417,60 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
     Ok(())
 }
 
-/// Path to the instance lock file
+/// Get the parent process PID (the shell that spawned us).
+/// Used to scope the lock file per terminal window.
+#[cfg(unix)]
+fn parent_pid() -> u32 {
+    unsafe { libc::getppid() as u32 }
+}
+
+#[cfg(windows)]
+fn parent_pid() -> u32 {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
+        TH32CS_SNAPPROCESS,
+    };
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return 0;
+        }
+
+        let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+
+        if Process32First(snap, &mut entry) == 0 {
+            CloseHandle(snap);
+            return 0;
+        }
+
+        let our_pid = std::process::id();
+        loop {
+            if entry.th32ProcessID == our_pid {
+                let ppid = entry.th32ParentProcessID;
+                CloseHandle(snap);
+                return ppid;
+            }
+            if Process32Next(snap, &mut entry) == 0 {
+                break;
+            }
+        }
+
+        CloseHandle(snap);
+        0
+    }
+}
+
+/// Path to the instance lock file, scoped by parent shell PID.
+/// Different terminal windows get different lock files; running bark
+/// twice in the same shell hits the same lock file.
 fn lock_file_path() -> std::path::PathBuf {
     let dir = config::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("bark.lock")
+    dir.join(format!("bark.{}.lock", parent_pid()))
 }
 
 /// Check if another instance is running by reading the lock file PID.
@@ -1293,21 +1480,8 @@ fn check_existing_instance() -> Option<u32> {
     let contents = std::fs::read_to_string(&path).ok()?;
     let pid: u32 = contents.trim().parse().ok()?;
 
-    // Check if that PID is still alive
-    #[cfg(unix)]
-    {
-        // signal 0 checks existence without sending a signal
-        let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
-        if alive && pid != std::process::id() {
-            return Some(pid);
-        }
-    }
-    #[cfg(windows)]
-    {
-        // On Windows, just trust the lock file if PID differs from ours
-        if pid != std::process::id() {
-            return Some(pid);
-        }
+    if pid != std::process::id() && is_process_alive(pid) {
+        return Some(pid);
     }
 
     None
@@ -1323,6 +1497,66 @@ fn write_lock_file() {
 fn remove_lock_file() {
     let path = lock_file_path();
     let _ = std::fs::remove_file(&path);
+}
+
+/// Check if a process is still alive
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if !handle.is_null() {
+                CloseHandle(handle);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Clean up stale lock files from crashed/killed instances.
+/// Also removes the old global `bark.lock` from before per-shell locking.
+fn cleanup_stale_lock_files() {
+    let dir = match config::config_dir() {
+        Some(d) => d,
+        None => return,
+    };
+
+    // Remove legacy global lock file
+    let _ = std::fs::remove_file(dir.join("bark.lock"));
+
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Match bark.<ppid>.lock files
+        if !name_str.starts_with("bark.") || !name_str.ends_with(".lock") {
+            continue;
+        }
+        // Read the PID stored inside and check if it's still alive
+        if let Ok(contents) = std::fs::read_to_string(entry.path()) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                let alive = is_process_alive(pid);
+                if !alive {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            } else {
+                // Corrupt lock file, remove it
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Show a TUI confirmation dialog asking whether to proceed when another instance is detected.
@@ -1397,8 +1631,68 @@ fn has_cursor_move(s: &str) -> bool {
     false
 }
 
+fn day_of_week_name(wday: u32) -> &'static str {
+    match wday {
+        0 => "Sunday", 1 => "Monday", 2 => "Tuesday", 3 => "Wednesday",
+        4 => "Thursday", 5 => "Friday", 6 => "Saturday", _ => "",
+    }
+}
+
+fn month_name(month: u32) -> &'static str {
+    match month {
+        1 => "January", 2 => "February", 3 => "March", 4 => "April",
+        5 => "May", 6 => "June", 7 => "July", 8 => "August",
+        9 => "September", 10 => "October", 11 => "November", 12 => "December",
+        _ => "",
+    }
+}
+
+/// Get the current local date and time as (day_of_week, month, day, hour, minute).
+/// day_of_week: 0=Sunday .. 6=Saturday. Uses platform-native APIs.
+#[cfg(unix)]
+fn local_datetime_now() -> (u32, u32, u32, u32, u32) {
+    unsafe {
+        let epoch = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&epoch, &mut tm);
+        (
+            tm.tm_wday as u32,
+            (tm.tm_mon + 1) as u32,
+            tm.tm_mday as u32,
+            tm.tm_hour as u32,
+            tm.tm_min as u32,
+        )
+    }
+}
+
+#[cfg(windows)]
+fn local_datetime_now() -> (u32, u32, u32, u32, u32) {
+    #[repr(C)]
+    struct SystemTime {
+        _year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        _second: u16,
+        _milliseconds: u16,
+    }
+    unsafe extern "system" {
+        fn GetLocalTime(lp: *mut SystemTime);
+    }
+    unsafe {
+        let mut st: SystemTime = std::mem::zeroed();
+        GetLocalTime(&mut st);
+        (st.day_of_week as u32, st.month as u32, st.day as u32, st.hour as u32, st.minute as u32)
+    }
+}
+
 fn main() -> io::Result<()> {
     setup_panic_hook();
+
+    // Clean up stale lock files from crashed instances
+    cleanup_stale_lock_files();
 
     // Check for duplicate instance before setting up the full app
     let existing_pid = check_existing_instance();

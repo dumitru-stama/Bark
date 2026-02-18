@@ -34,6 +34,7 @@ pub struct Theme {
     pub status_error_fg: Color,
     pub git_clean: Color,
     pub git_dirty: Color,
+    pub status_python_env: Color,
 
     // Viewer
     pub viewer_header_bg: Color,
@@ -126,6 +127,7 @@ impl Theme {
             status_error_fg: Color::White,
             git_clean: Color::Rgb(152, 195, 121),     // Soft green
             git_dirty: gold,
+            status_python_env: Color::Rgb(97, 175, 239),  // Soft blue
 
             // Viewer
             viewer_header_bg: teal,
@@ -204,6 +206,7 @@ impl Theme {
             status_error_fg: Color::White,
             git_clean: Color::Green,
             git_dirty: Color::Yellow,
+            status_python_env: Color::LightCyan,
 
             // Viewer
             viewer_header_bg: Color::Cyan,
@@ -282,6 +285,7 @@ impl Theme {
             status_error_fg: Color::White,
             git_clean: Color::Green,
             git_dirty: Color::Rgb(180, 100, 0), // Orange-ish for visibility
+            status_python_env: Color::Blue,
 
             // Viewer
             viewer_header_bg: Color::Blue,
@@ -367,6 +371,7 @@ impl Theme {
                     "status_error_fg" => self.status_error_fg = color,
                     "git_clean" => self.git_clean = color,
                     "git_dirty" => self.git_dirty = color,
+                    "status_python_env" => self.status_python_env = color,
                     "viewer_header_bg" => self.viewer_header_bg = color,
                     "viewer_header_fg" => self.viewer_header_fg = color,
                     "viewer_content_bg" => self.viewer_content_bg = color,

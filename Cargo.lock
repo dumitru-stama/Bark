@@ -122,6 +122,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bark-ascii-table"
+version = "1.0.0"
+
+[[package]]
+name = "bark-calculator"
+version = "1.0.0"
+
+[[package]]
 name = "bark-elf-viewer"
 version = "0.1.0"
 dependencies = [
@@ -160,6 +168,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bark-notes"
+version = "1.0.0"
+
+[[package]]
 name = "bark-pdf-viewer"
 version = "0.1.0"
 dependencies = [
@@ -179,6 +191,10 @@ dependencies = [
 [[package]]
 name = "bark-plugin-api"
 version = "0.1.0"
+
+[[package]]
+name = "bark-stopwatch"
+version = "1.0.0"
 
 [[package]]
 name = "bark-webdav-plugin"

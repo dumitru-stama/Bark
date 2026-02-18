@@ -3301,3 +3301,119 @@ impl Widget for EditOwnerDialog<'_> {
         buf.set_string(help_x, dialog_area.y + dialog_area.height - 1, help, help_style);
     }
 }
+
+// ============================================================================
+// Overlay Plugin Dialog
+// ============================================================================
+
+/// Overlay dialog that renders plugin output in a centered bordered box
+pub struct OverlayDialog<'a> {
+    lines: &'a [String],
+    title: &'a str,
+    width: u16,
+    height: u16,
+    theme: &'a Theme,
+}
+
+impl<'a> OverlayDialog<'a> {
+    pub fn new(lines: &'a [String], title: &'a str, width: u16, height: u16, theme: &'a Theme) -> Self {
+        Self { lines, title, width, height, theme }
+    }
+}
+
+impl ratatui::widgets::Widget for OverlayDialog<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        use super::dialog_helpers::{DialogRenderer, DialogStyles};
+
+        let dialog_area = match DialogRenderer::center_dialog(area, self.width, self.height, 20) {
+            Some(a) => a,
+            None => return,
+        };
+
+        let bg_color = self.theme.dialog_copy_bg;
+        let border_color = self.theme.panel_border_active;
+        let styles = DialogStyles::new(self.theme, bg_color, border_color);
+
+        DialogRenderer::fill_background(dialog_area, buf, styles.bg);
+        DialogRenderer::draw_border(dialog_area, buf, styles.border);
+        DialogRenderer::draw_title(dialog_area, buf, self.title, styles.title);
+
+        // Render plugin lines inside the bordered area
+        let content_x = dialog_area.x + 1;
+        let content_width = dialog_area.width.saturating_sub(2) as usize;
+        let content_height = dialog_area.height.saturating_sub(2) as usize;
+        let text_style = Style::default().fg(self.theme.dialog_text).bg(bg_color);
+
+        for (i, line) in self.lines.iter().enumerate().take(content_height) {
+            let y = dialog_area.y + 1 + i as u16;
+            // Clear the line first
+            for col in content_x..content_x + content_width as u16 {
+                if col < dialog_area.x + dialog_area.width - 1 {
+                    buf[(col, y)].set_char(' ').set_style(text_style);
+                }
+            }
+            // Truncate line if needed
+            let display: String = line.chars().take(content_width).collect();
+            buf.set_string(content_x, y, &display, text_style);
+        }
+    }
+}
+
+// ============================================================================
+// Overlay Plugin Selector Dialog
+// ============================================================================
+
+/// Selector dialog for choosing which overlay plugin to launch
+pub struct OverlaySelectorDialog<'a> {
+    plugins: &'a [(String, String)],
+    selected: usize,
+    theme: &'a Theme,
+}
+
+impl<'a> OverlaySelectorDialog<'a> {
+    pub fn new(plugins: &'a [(String, String)], selected: usize, theme: &'a Theme) -> Self {
+        Self { plugins, selected, theme }
+    }
+}
+
+impl ratatui::widgets::Widget for OverlaySelectorDialog<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        use super::dialog_helpers::{DialogRenderer, DialogStyles};
+
+        let height = (self.plugins.len() as u16 + 4).min(20);
+        let width = 40u16;
+        let dialog_area = match DialogRenderer::center_dialog(area, width, height, 20) {
+            Some(a) => a,
+            None => return,
+        };
+
+        let bg_color = self.theme.dialog_copy_bg;
+        let border_color = self.theme.panel_border_active;
+        let styles = DialogStyles::new(self.theme, bg_color, border_color);
+
+        DialogRenderer::fill_background(dialog_area, buf, styles.bg);
+        DialogRenderer::draw_border(dialog_area, buf, styles.border);
+        DialogRenderer::draw_title(dialog_area, buf, " Overlay Plugins ", styles.title);
+
+        let content_x = dialog_area.x + 2;
+        let content_width = dialog_area.width.saturating_sub(4) as usize;
+        let content_height = dialog_area.height.saturating_sub(3) as usize;
+        let text_style = Style::default().fg(self.theme.dialog_text).bg(bg_color);
+        let highlight_style = Style::default().fg(self.theme.cursor_fg).bg(self.theme.cursor_bg);
+
+        for (i, (name, _desc)) in self.plugins.iter().enumerate().take(content_height) {
+            let y = dialog_area.y + 1 + i as u16;
+            let style = if i == self.selected { highlight_style } else { text_style };
+            // Clear line
+            for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+                buf[(col, y)].set_char(' ').set_style(style);
+            }
+            let display: String = name.chars().take(content_width).collect();
+            buf.set_string(content_x, y, &display, style);
+        }
+
+        // Help text
+        let help = " Enter=Select  Esc=Cancel ";
+        DialogRenderer::draw_help(dialog_area, buf, help, styles.help);
+    }
+}

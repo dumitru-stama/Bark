@@ -10,6 +10,8 @@ pub enum PluginType {
     StatusBar = 0,
     /// Custom file viewer for specific file types
     Viewer = 1,
+    /// Overlay dialog plugin (interactive UI overlay)
+    Overlay = 2,
 }
 
 impl TryFrom<u32> for PluginType {
@@ -19,9 +21,33 @@ impl TryFrom<u32> for PluginType {
         match value {
             0 => Ok(PluginType::StatusBar),
             1 => Ok(PluginType::Viewer),
+            2 => Ok(PluginType::Overlay),
             _ => Err(()),
         }
     }
+}
+
+/// Information about a loaded overlay plugin
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct OverlayPluginInfo {
+    pub name: String,
+    pub description: String,
+    pub width: u16,
+    pub height: u16,
+    pub source: PathBuf,
+}
+
+/// Result from an overlay plugin render
+#[derive(Debug, Clone)]
+pub struct OverlayRenderResult {
+    pub lines: Vec<String>,
+    pub title: String,
+    pub width: u16,
+    pub height: u16,
+    pub close: bool,
+    /// When true, Bark sends periodic "tick" commands for live updates (e.g. stopwatch)
+    pub tick: bool,
 }
 
 /// Information about a loaded plugin

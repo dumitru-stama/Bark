@@ -270,10 +270,16 @@ pub struct DisplayConfig {
     pub panel_ratio: u16,
     /// Show git status in status bar
     pub show_git_status: bool,
+    /// Show Python virtual environment in status bar
+    pub show_python_env: bool,
     /// Date format: "relative" or "absolute"
     pub date_format: String,
     /// Show directory prefix (/ on Unix, \ on Windows) before folder names
     pub show_dir_prefix: bool,
+    /// Show current date on the right panel top border
+    pub show_date: bool,
+    /// Show current time on the right panel top border
+    pub show_time: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,7 +385,7 @@ pub fn default_keybinding(action: &str) -> &'static str {
 
         // Sorting
         "sort_name" => "Ctrl+N",
-        "sort_extension" => "Ctrl+E",
+        "sort_extension" => "Ctrl+F4",
         "sort_time" => "Ctrl+T",
         "sort_size" => "Ctrl+S",
         "sort_name_f" => "Ctrl+F3",
@@ -403,6 +409,7 @@ pub fn default_keybinding(action: &str) -> &'static str {
         "insert_fullpath" => "Alt+Enter",
         "command_history" => "Alt+H",
         "command_history_alt" => "F9",
+        "recall_history" => "Ctrl+E",
 
         // Source selector (drives/quick access/connections)
         "drive_left" => "Alt+F1",
@@ -427,6 +434,9 @@ pub fn default_keybinding(action: &str) -> &'static str {
 
         // Viewer
         "viewer_save" => "Ctrl+S",
+
+        // Overlay plugins
+        "overlay_plugins" => "Alt+P",
 
         // Unknown action
         _ => "",
@@ -496,8 +506,11 @@ impl Default for DisplayConfig {
             shell_height: 1,
             panel_ratio: 50,
             show_git_status: true,
+            show_python_env: true,
             date_format: "absolute".to_string(),
             show_dir_prefix: false,
+            show_date: true,
+            show_time: true,
         }
     }
 }
@@ -675,11 +688,20 @@ panel_ratio = 50
 # Show git branch and status in status bar
 show_git_status = true
 
+# Show Python virtual environment in status bar
+show_python_env = true
+
 # Date format: "absolute" (2024-01-15 10:30) or "relative" (2 hours ago)
 date_format = "absolute"
 
 # Show directory prefix (/ or \\) before folder names
 show_dir_prefix = false
+
+# Show current date on the right panel top border
+show_date = true
+
+# Show current time on the right panel top border
+show_time = true
 
 [sorting]
 # Sort field: "name", "extension", "size", "modified", "unsorted"
@@ -891,7 +913,7 @@ preset = "dark"
 #
 # ## Sorting
 # sort_name = "Ctrl+N"            # Sort by name
-# sort_extension = "Ctrl+E"       # Sort by extension
+# sort_extension = "Ctrl+F4"      # Sort by extension
 # sort_time = "Ctrl+T"            # Sort by modification time
 # sort_size = "Ctrl+S"            # Sort by size
 # sort_name_f = "Ctrl+F3"         # Sort by name (F-key)
@@ -915,6 +937,7 @@ preset = "dark"
 # insert_fullpath = "Alt+Enter"   # Insert full path into command
 # command_history = "Alt+H"       # Show command history
 # command_history_alt = "F9"      # Alternative command history
+# recall_history = "Ctrl+E"      # Recall last command for editing
 #
 # ## Source selector (drives/quick access/remote connections)
 # drive_left = "Alt+F1"           # Source selector for left panel
@@ -1096,8 +1119,11 @@ impl Config {
             display["shell_height"] = value(self.display.shell_height as i64);
             display["panel_ratio"] = value(self.display.panel_ratio as i64);
             display["show_git_status"] = value(self.display.show_git_status);
+            display["show_python_env"] = value(self.display.show_python_env);
             display["date_format"] = value(&self.display.date_format);
             display["show_dir_prefix"] = value(self.display.show_dir_prefix);
+            display["show_date"] = value(self.display.show_date);
+            display["show_time"] = value(self.display.show_time);
         }
 
         // Update [sorting] section

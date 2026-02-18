@@ -365,3 +365,130 @@ impl Widget for FileOpProgressDialog<'_> {
         }
     }
 }
+
+/// File operation error dialog with Retry/Skip/Skip All/Abort buttons
+pub struct FileOpErrorDialog<'a> {
+    file_path: &'a str,
+    error_message: &'a str,
+    focus: usize,
+    theme: &'a Theme,
+}
+
+impl<'a> FileOpErrorDialog<'a> {
+    pub fn new(
+        file_path: &'a str,
+        error_message: &'a str,
+        focus: usize,
+        theme: &'a Theme,
+    ) -> Self {
+        Self { file_path, error_message, focus, theme }
+    }
+}
+
+impl Widget for FileOpErrorDialog<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let theme = self.theme;
+        let dialog_width = 56u16.min(area.width.saturating_sub(4));
+        let dialog_height = 10u16;
+
+        let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+        let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
+
+        let dialog_bg = Style::default()
+            .bg(theme.dialog_delete_bg)
+            .fg(theme.dialog_text);
+        let title_style = Style::default()
+            .fg(theme.dialog_delete_border)
+            .bg(theme.dialog_delete_bg)
+            .add_modifier(Modifier::BOLD);
+        let border_style = Style::default()
+            .fg(theme.dialog_delete_border)
+            .bg(theme.dialog_delete_bg);
+        let error_style = Style::default()
+            .fg(theme.dialog_delete_border)
+            .bg(theme.dialog_delete_bg)
+            .add_modifier(Modifier::BOLD);
+        let help_style = Style::default()
+            .fg(theme.dialog_help)
+            .bg(theme.dialog_delete_bg);
+        let button_normal = Style::default()
+            .fg(theme.dialog_text)
+            .bg(theme.dialog_delete_bg);
+        let button_focused = Style::default()
+            .fg(theme.dialog_delete_button_focused_fg)
+            .bg(theme.dialog_delete_button_focused_bg)
+            .add_modifier(Modifier::BOLD);
+
+        // Clear area
+        for row in dialog_area.y..dialog_area.y + dialog_area.height {
+            for col in dialog_area.x..dialog_area.x + dialog_area.width {
+                buf[(col, row)].set_style(dialog_bg);
+                buf[(col, row)].set_char(' ');
+            }
+        }
+
+        // Border
+        buf[(dialog_area.x, dialog_area.y)].set_char('╭').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y)].set_char('╮').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y)].set_char('─').set_style(border_style);
+        }
+        buf[(dialog_area.x, dialog_area.y + dialog_area.height - 1)].set_char('╰').set_style(border_style);
+        buf[(dialog_area.x + dialog_area.width - 1, dialog_area.y + dialog_area.height - 1)].set_char('╯').set_style(border_style);
+        for col in dialog_area.x + 1..dialog_area.x + dialog_area.width - 1 {
+            buf[(col, dialog_area.y + dialog_area.height - 1)].set_char('─').set_style(border_style);
+        }
+        for row in dialog_area.y + 1..dialog_area.y + dialog_area.height - 1 {
+            buf[(dialog_area.x, row)].set_char('│').set_style(border_style);
+            buf[(dialog_area.x + dialog_area.width - 1, row)].set_char('│').set_style(border_style);
+        }
+
+        // Title
+        let title = " Error ";
+        let title_x = dialog_area.x + (dialog_area.width.saturating_sub(title.len() as u16)) / 2;
+        buf.set_string(title_x, dialog_area.y, title, title_style);
+
+        let inner_width = (dialog_width - 4) as usize;
+
+        // File path (truncated from the left if too long)
+        let path_label = "File: ";
+        let path_max = inner_width.saturating_sub(path_label.len());
+        let display_path = if self.file_path.len() > path_max {
+            let skip = self.file_path.len() - path_max + 3;
+            format!("...{}", &self.file_path[skip..])
+        } else {
+            self.file_path.to_string()
+        };
+        buf.set_string(dialog_area.x + 2, dialog_area.y + 2, path_label, dialog_bg);
+        buf.set_string(dialog_area.x + 2 + path_label.len() as u16, dialog_area.y + 2, &display_path, dialog_bg);
+
+        // Error message (truncated, bold red)
+        let err_display: String = self.error_message.chars().take(inner_width).collect();
+        let err_x = dialog_area.x + (dialog_area.width.saturating_sub(err_display.len() as u16)) / 2;
+        buf.set_string(err_x, dialog_area.y + 4, &err_display, error_style);
+
+        // Buttons: [Retry] [Skip] [Skip All] [Abort]
+        let buttons = ["Retry", "Skip", "Skip All", "Abort"];
+        let hotkeys = "R=Retry  S=Skip  K=Skip All  A/Esc=Abort";
+
+        // Calculate total button width
+        let total_btn_width: usize = buttons.iter().map(|b| b.len() + 4).sum::<usize>() + buttons.len() - 1;
+        let btn_start_x = dialog_area.x + (dialog_area.width.saturating_sub(total_btn_width as u16)) / 2;
+        let btn_y = dialog_area.y + 6;
+
+        let mut bx = btn_start_x;
+        for (i, label) in buttons.iter().enumerate() {
+            let styled = if i == self.focus { button_focused } else { button_normal };
+            let btn_text = format!("[ {} ]", label);
+            buf.set_string(bx, btn_y, &btn_text, styled);
+            bx += btn_text.len() as u16 + 1;
+        }
+
+        // Hotkey help on bottom border
+        if dialog_width > hotkeys.len() as u16 + 4 {
+            let help_x = dialog_area.x + (dialog_area.width.saturating_sub(hotkeys.len() as u16)) / 2;
+            buf.set_string(help_x, dialog_area.y + dialog_area.height - 1, hotkeys, help_style);
+        }
+    }
+}

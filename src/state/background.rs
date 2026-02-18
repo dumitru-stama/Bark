@@ -1,7 +1,7 @@
 //! Background task handling for async operations
 
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 
@@ -22,6 +22,21 @@ pub struct FileOpProgress {
     pub current_file: String,
     pub files_done: usize,
     pub files_total: usize,
+}
+
+/// An error from a file operation, sent to the main thread for user interaction
+pub struct FileOpError {
+    pub file_path: String,
+    pub error_message: String,
+}
+
+/// User's response to a file operation error
+#[derive(Clone, Debug)]
+pub enum FileOpErrorResponse {
+    Retry,
+    Skip,
+    SkipAll,
+    Abort,
 }
 
 /// Result of a completed file operation
@@ -116,6 +131,10 @@ pub struct BackgroundTask {
     pub receiver: Receiver<TaskResult>,
     /// Progress receiver for file operations
     pub progress_rx: Option<Receiver<FileOpProgress>>,
+    /// Receiver for file operation errors (main thread reads errors from worker)
+    pub error_rx: Option<Receiver<FileOpError>>,
+    /// Sender for file operation error responses (main thread sends user's choice back)
+    pub error_response_tx: Option<Sender<FileOpErrorResponse>>,
     /// Thread handle (for cleanup)
     _handle: JoinHandle<()>,
 }
@@ -160,6 +179,8 @@ impl BackgroundTask {
         BackgroundTask {
             receiver: rx,
             progress_rx: None,
+            error_rx: None,
+            error_response_tx: None,
             _handle: handle,
         }
     }
@@ -212,6 +233,8 @@ impl BackgroundTask {
         BackgroundTask {
             receiver: rx,
             progress_rx: None,
+            error_rx: None,
+            error_response_tx: None,
             _handle: handle,
         }
     }
@@ -269,6 +292,8 @@ impl BackgroundTask {
         BackgroundTask {
             receiver: rx,
             progress_rx: None,
+            error_rx: None,
+            error_response_tx: None,
             _handle: handle,
         }
     }
@@ -327,6 +352,8 @@ impl BackgroundTask {
         BackgroundTask {
             receiver: rx,
             progress_rx: None,
+            error_rx: None,
+            error_response_tx: None,
             _handle: handle,
         }
     }
@@ -408,6 +435,8 @@ impl BackgroundTask {
         BackgroundTask {
             receiver: rx,
             progress_rx: None,
+            error_rx: None,
+            error_response_tx: None,
             _handle: handle,
         }
     }
@@ -421,6 +450,8 @@ impl BackgroundTask {
     ) -> Self {
         let (tx, rx) = channel::<TaskResult>();
         let (progress_tx, progress_rx) = channel::<FileOpProgress>();
+        let (error_tx, error_rx) = channel::<FileOpError>();
+        let (error_response_tx, error_response_rx) = channel::<FileOpErrorResponse>();
 
         let bytes_total = calculate_total_bytes(&sources);
         let files_total = sources.len();
@@ -429,14 +460,17 @@ impl BackgroundTask {
             let mut count = 0usize;
             let mut errors = Vec::new();
             let bytes_done = Arc::new(AtomicU64::new(0));
+            let mut skip_all_errors = false;
             // Single file to a non-directory destination = rename
             let is_rename = sources.len() == 1 && !dest.is_dir();
 
-            for (i, src_path) in sources.iter().enumerate() {
+            let mut i = 0;
+            while i < sources.len() {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
 
+                let src_path = &sources[i];
                 let file_name = src_path.file_name().unwrap_or_default();
                 let dest_file = if is_rename {
                     dest.clone()
@@ -479,9 +513,42 @@ impl BackgroundTask {
                 };
 
                 match result {
-                    Ok(()) => count += 1,
+                    Ok(()) => {
+                        count += 1;
+                        i += 1;
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => break,
-                    Err(e) => errors.push(format!("{}: {}", src_path.display(), e)),
+                    Err(e) => {
+                        let err_msg = format!("{}: {}", src_path.display(), e);
+                        if skip_all_errors {
+                            errors.push(err_msg);
+                            i += 1;
+                        } else {
+                            // Send error to main thread and block waiting for response
+                            let _ = error_tx.send(FileOpError {
+                                file_path: src_path.display().to_string(),
+                                error_message: e.to_string(),
+                            });
+                            match error_response_rx.recv() {
+                                Ok(FileOpErrorResponse::Retry) => {
+                                    // Don't increment i — retry same file
+                                }
+                                Ok(FileOpErrorResponse::Skip) => {
+                                    errors.push(err_msg);
+                                    i += 1;
+                                }
+                                Ok(FileOpErrorResponse::SkipAll) => {
+                                    skip_all_errors = true;
+                                    errors.push(err_msg);
+                                    i += 1;
+                                }
+                                Ok(FileOpErrorResponse::Abort) | Err(_) => {
+                                    errors.push(err_msg);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -501,6 +568,8 @@ impl BackgroundTask {
         BackgroundTask {
             receiver: rx,
             progress_rx: Some(progress_rx),
+            error_rx: Some(error_rx),
+            error_response_tx: Some(error_response_tx),
             _handle: handle,
         }
     }
@@ -520,6 +589,8 @@ impl BackgroundTask {
     ) -> Self {
         let (tx, rx) = channel::<TaskResult>();
         let (progress_tx, progress_rx) = channel::<FileOpProgress>();
+        let (error_tx, error_rx) = channel::<FileOpError>();
+        let (error_response_tx, error_response_rx) = channel::<FileOpErrorResponse>();
 
         let files_total = source_metas.len();
         let bytes_total: u64 = source_metas.iter().map(|m| m.size).sum();
@@ -536,12 +607,15 @@ impl BackgroundTask {
             let mut count = 0usize;
             let mut errors: Vec<String> = Vec::new();
             let bytes_done = Arc::new(AtomicU64::new(0));
+            let mut skip_all_errors = false;
 
-            for (i, meta) in source_metas.iter().enumerate() {
+            let mut i = 0;
+            while i < source_metas.len() {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
 
+                let meta = &source_metas[i];
                 let file_name = meta.path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 let dest_file = if is_rename {
                     dest.clone()
@@ -596,8 +670,40 @@ impl BackgroundTask {
                 bytes_done.fetch_add(meta.size, Ordering::Relaxed);
 
                 match result {
-                    Ok(()) => count += 1,
-                    Err(e) => errors.push(format!("{}: {}", meta.path.display(), e)),
+                    Ok(()) => {
+                        count += 1;
+                        i += 1;
+                    }
+                    Err(e) => {
+                        let err_msg = format!("{}: {}", meta.path.display(), e);
+                        if skip_all_errors {
+                            errors.push(err_msg);
+                            i += 1;
+                        } else {
+                            let _ = error_tx.send(FileOpError {
+                                file_path: meta.path.display().to_string(),
+                                error_message: e,
+                            });
+                            match error_response_rx.recv() {
+                                Ok(FileOpErrorResponse::Retry) => {
+                                    // Don't increment i — retry same file
+                                }
+                                Ok(FileOpErrorResponse::Skip) => {
+                                    errors.push(err_msg);
+                                    i += 1;
+                                }
+                                Ok(FileOpErrorResponse::SkipAll) => {
+                                    skip_all_errors = true;
+                                    errors.push(err_msg);
+                                    i += 1;
+                                }
+                                Ok(FileOpErrorResponse::Abort) | Err(_) => {
+                                    errors.push(err_msg);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -618,6 +724,8 @@ impl BackgroundTask {
         BackgroundTask {
             receiver: rx,
             progress_rx: Some(progress_rx),
+            error_rx: Some(error_rx),
+            error_response_tx: Some(error_response_tx),
             _handle: handle,
         }
     }

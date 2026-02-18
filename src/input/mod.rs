@@ -67,6 +67,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         Mode::EditingPermissions { .. } => dialogs::handle_permissions_mode(app, key),
         #[cfg(not(windows))]
         Mode::EditingOwner { .. } => dialogs::handle_owner_mode(app, key),
+        Mode::FileOpErrorDialog { .. } => dialogs::handle_file_op_error_mode(app, key),
+        Mode::Overlay { .. } => dialogs::handle_overlay_mode(app, key),
+        Mode::OverlaySelector { .. } => dialogs::handle_overlay_selector_mode(app, key),
         Mode::FileOpProgress { .. } => {
             // During file operations, Escape cancels
             if key.code == KeyCode::Esc {

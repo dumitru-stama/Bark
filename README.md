@@ -124,7 +124,7 @@ Use `F5` to extract files to the other panel. Press `Esc` or navigate to `..` at
 | Key | Action |
 |-----|--------|
 | `Ctrl+N` / `Ctrl+F3` | Sort by name |
-| `Ctrl+E` / `Ctrl+F4` | Sort by extension |
+| `Ctrl+F4` | Sort by extension |
 | `Ctrl+T` / `Ctrl+F5` | Sort by modification time |
 | `Ctrl+S` / `Ctrl+F6` | Sort by size |
 | `Ctrl+F7` | Unsorted (original order) |
@@ -141,6 +141,7 @@ Use `F5` to extract files to the other panel. Press `Esc` or navigate to `..` at
 | `Ctrl+PgUp/PgDn` | Scroll shell output by 10 lines |
 | `Alt+Up/Down` | Scroll shell output by one line (macOS alternative) |
 | `Alt+PgUp/PgDn` | Scroll shell output by 10 lines (macOS alternative) |
+| `Ctrl+E` | Recall command from history (press repeatedly to cycle) |
 | `Alt+H` / `F9` | Command history panel |
 
 Alt+Arrow variants are provided because `Ctrl+Up/Down` triggers Mission Control on macOS.
@@ -199,6 +200,14 @@ Configuration is stored in a platform-specific directory:
 :themes            List available themes
 :touch <file>      Create file or update timestamp (built-in fallback for Windows)
 :highlights        Show loaded file highlighting rules
+:sort_name_asc     Sort by name ascending
+:sort_name_desc    Sort by name descending
+:sort_ext_asc      Sort by extension ascending
+:sort_ext_desc     Sort by extension descending
+:sort_time_asc     Sort by time ascending
+:sort_time_desc    Sort by time descending
+:sort_size_asc     Sort by size ascending
+:sort_size_desc    Sort by size descending
 :q / :quit / :exit Quit
 ```
 

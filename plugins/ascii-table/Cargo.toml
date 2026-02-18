@@ -1,0 +1,8 @@
+[package]
+name = "bark-ascii-table"
+version = "1.0.0"
+edition = "2024"
+
+[[bin]]
+name = "bark-ascii-table"
+path = "src/main.rs"

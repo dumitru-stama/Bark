@@ -765,6 +765,24 @@ impl Panel {
         self.adjust_scroll();
     }
 
+    /// Set sort field and direction explicitly (no toggling)
+    pub fn set_sort_directed(&mut self, field: SortField, direction: SortDirection) {
+        self.sort_config.field = field;
+        self.sort_config.direction = direction;
+
+        let selected_path = self.selected().map(|e| e.path.clone());
+        self.resort();
+        if let Some(path) = selected_path {
+            for (i, &idx) in self.sorted_indices.iter().enumerate() {
+                if self.entries[idx].path == path {
+                    self.cursor = i;
+                    break;
+                }
+            }
+        }
+        self.adjust_scroll();
+    }
+
     /// Enter the selected directory
     /// Returns true if directory was entered, false otherwise
     /// Note: Archives are handled separately via background task in normal.rs

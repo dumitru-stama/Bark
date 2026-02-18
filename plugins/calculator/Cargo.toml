@@ -1,0 +1,8 @@
+[package]
+name = "bark-calculator"
+version = "1.0.0"
+edition = "2024"
+
+[[bin]]
+name = "bark-calculator"
+path = "src/main.rs"

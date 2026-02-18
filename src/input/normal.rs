@@ -282,6 +282,16 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Recall last command for editing (Ctrl+E)
+    if app.key_matches("recall_history", &key) {
+        if let Some(cmd) = app.cmd.history.last().cloned() {
+            app.cmd.set_input(cmd);
+            app.cmd.focused = true;
+            app.cmd.history_index = Some(app.cmd.history.len() - 1);
+        }
+        return;
+    }
+
     // Add to temp panel
     if app.key_matches("add_to_temp", &key) {
         app.add_to_temp_panel();
@@ -291,6 +301,12 @@ pub fn handle_normal_mode(app: &mut App, key: KeyEvent) {
     // Add current directory to favorites
     if app.key_matches("add_favorite", &key) {
         app.add_current_to_favorites();
+        return;
+    }
+
+    // Overlay plugins
+    if app.key_matches("overlay_plugins", &key) {
+        app.show_overlay_plugins();
         return;
     }
 
@@ -670,9 +686,10 @@ fn handle_command_input(app: &mut App, key: KeyEvent) {
             app.cmd.cursor_home();
         }
 
-        // Ctrl+E — move to end of line
+        // Ctrl+E — recall older command from history
         KeyCode::Char('e') if ctrl => {
-            app.cmd.cursor_end();
+            app.reset_completion();
+            app.history_up();
         }
 
         // Ctrl+W — delete word before cursor

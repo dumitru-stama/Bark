@@ -102,6 +102,10 @@ install-plugins: release
 	cp $(TARGET)/release/bark-pdf-viewer $(PLUGIN_DIR)/
 	cp $(TARGET)/release/bark-macho-viewer $(PLUGIN_DIR)/
 	cp $(TARGET)/release/bark-hex-editor $(PLUGIN_DIR)/
+	cp $(TARGET)/release/bark-calculator $(PLUGIN_DIR)/
+	cp $(TARGET)/release/bark-ascii-table $(PLUGIN_DIR)/
+	cp $(TARGET)/release/bark-notes $(PLUGIN_DIR)/
+	cp $(TARGET)/release/bark-stopwatch $(PLUGIN_DIR)/
 	cp plugins/scripts/*.py $(PLUGIN_DIR)/ 2>/dev/null || true
 	cp plugins/scripts/*.sh $(PLUGIN_DIR)/ 2>/dev/null || true
 	chmod +x $(PLUGIN_DIR)/* 2>/dev/null || true
@@ -122,6 +126,10 @@ install-plugins-debug: debug
 	cp $(TARGET)/debug/bark-pdf-viewer $(PLUGIN_DIR)/
 	cp $(TARGET)/debug/bark-macho-viewer $(PLUGIN_DIR)/
 	cp $(TARGET)/debug/bark-hex-editor $(PLUGIN_DIR)/
+	cp $(TARGET)/debug/bark-calculator $(PLUGIN_DIR)/
+	cp $(TARGET)/debug/bark-ascii-table $(PLUGIN_DIR)/
+	cp $(TARGET)/debug/bark-notes $(PLUGIN_DIR)/
+	cp $(TARGET)/debug/bark-stopwatch $(PLUGIN_DIR)/
 	cp plugins/scripts/*.py $(PLUGIN_DIR)/ 2>/dev/null || true
 	chmod +x $(PLUGIN_DIR)/* 2>/dev/null || true
 	@echo "Debug plugins installed to $(PLUGIN_DIR)"

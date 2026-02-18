@@ -526,4 +526,36 @@ pub enum Mode {
         /// Spinner animation frame
         frame: usize,
     },
+    /// Overlay plugin dialog (interactive plugin UI)
+    Overlay {
+        plugin_name: String,
+        lines: Vec<String>,
+        title: String,
+        width: u16,
+        height: u16,
+        /// When true, Bark sends periodic tick commands for live updates
+        tick: bool,
+    },
+    /// Overlay plugin selector (when multiple overlay plugins are available)
+    OverlaySelector {
+        plugins: Vec<(String, String)>, // (name, description)
+        selected: usize,
+    },
+    /// Error dialog during a file operation (Retry/Skip/SkipAll/Abort)
+    FileOpErrorDialog {
+        /// Path of the file that caused the error
+        file_path: String,
+        /// Error message from the OS
+        error_message: String,
+        /// Focused button: 0=Retry, 1=Skip, 2=Skip All, 3=Abort
+        focus: usize,
+        /// Preserved progress state for restoring after user responds
+        saved_title: String,
+        saved_bytes_done: u64,
+        saved_bytes_total: u64,
+        saved_current_file: String,
+        saved_files_done: usize,
+        saved_files_total: usize,
+        saved_frame: usize,
+    },
 }

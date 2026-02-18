@@ -440,10 +440,14 @@ FILE SELECTION
 SORTING
 =======
   Ctrl+N       Sort by name (toggle asc/desc)
-  Ctrl+E       Sort by extension
   Ctrl+T       Sort by modification time
   Ctrl+S       Sort by size
   Ctrl+F3-F7   Alternative: Name/Ext/Time/Size/Unsorted
+
+COMMAND HISTORY
+===============
+  Ctrl+E       Recall command from history (press repeatedly to cycle)
+  Alt+H / F9   Open command history panel
 
 DISPLAY
 =======
@@ -458,6 +462,7 @@ COMMAND MODE (after pressing :)
   Up           Previous command from history
   Down         Next command from history
   Backspace    Delete character
+  Ctrl+E       Previous command from history
   Ctrl+U       Clear line
   Ctrl+K       Clear line
   Ctrl+O       Toggle shell mode
@@ -488,6 +493,14 @@ BUILT-IN COMMANDS (type after :)
                       sort=name/ext/size/modified
                       theme=<name>
                       remember_path=true/false
+  sort_name_asc     Sort by name ascending
+  sort_name_desc    Sort by name descending
+  sort_ext_asc      Sort by extension ascending
+  sort_ext_desc     Sort by extension descending
+  sort_time_asc     Sort by time ascending
+  sort_time_desc    Sort by time descending
+  sort_size_asc     Sort by size ascending
+  sort_size_desc    Sort by size descending
   theme <name>      Switch color scheme (built-in or custom)
   themes            List all available themes
   q, quit, exit     Quit

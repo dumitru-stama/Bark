@@ -38,9 +38,12 @@ pub use theme::Theme;
 pub use theme::ThemeConfig;
 pub use viewer::FileViewer;
 pub use viewer_menu::ViewerPluginMenu;
+pub use dialog::OverlayDialog;
+pub use dialog::OverlaySelectorDialog;
 pub use dialog::OverwriteConfirmDialog;
 pub use spinner::SpinnerDialog;
 pub use spinner::FileOpProgressDialog;
+pub use spinner::FileOpErrorDialog;
 #[cfg(not(windows))]
 pub use dialog::EditPermissionsDialog;
 #[cfg(not(windows))]

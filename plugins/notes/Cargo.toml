@@ -1,0 +1,8 @@
+[package]
+name = "bark-notes"
+version = "1.0.0"
+edition = "2024"
+
+[[bin]]
+name = "bark-notes"
+path = "src/main.rs"

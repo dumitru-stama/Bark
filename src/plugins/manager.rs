@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use crate::plugins::api::*;
+use crate::plugins::overlay_script::ScriptOverlayPlugin;
 use crate::plugins::provider_script::ScriptProviderPlugin;
 use crate::plugins::script::ScriptPlugin;
 
@@ -18,6 +19,8 @@ pub struct PluginManager {
     viewer_plugins: Vec<Arc<dyn ViewerPlugin>>,
     /// Provider plugins (for remote filesystems like S3, GDrive, etc.)
     provider_plugins: Vec<Arc<dyn ProviderPlugin>>,
+    /// Overlay plugins (interactive dialog overlays)
+    overlay_plugins: Vec<(OverlayPluginInfo, PathBuf)>,
     /// Plugin directory
     plugin_dir: Option<PathBuf>,
 }
@@ -30,6 +33,7 @@ impl PluginManager {
             status_plugins: Vec::new(),
             viewer_plugins: Vec::new(),
             provider_plugins: Vec::new(),
+            overlay_plugins: Vec::new(),
             plugin_dir: None,
         }
     }
@@ -68,6 +72,16 @@ impl PluginManager {
                         Err(e) => errors.push(format!("{}: {}", path.display(), e)),
                     }
                 }
+                "overlay" => {
+                    match ScriptOverlayPlugin::load(&path) {
+                        Ok(plugin) => {
+                            let info = plugin.info.clone();
+                            let exe = plugin.executable.clone();
+                            self.overlay_plugins.push((info, exe));
+                        }
+                        Err(e) => errors.push(format!("{}: {}", path.display(), e)),
+                    }
+                }
                 "status" | "statusbar" | "status_bar" | "viewer" | "view" => {
                     match ScriptPlugin::load(&path) {
                         Ok(plugin) => self.register_script_plugin(plugin),
@@ -90,6 +104,7 @@ impl PluginManager {
         match info.plugin_type {
             PluginType::StatusBar => self.status_plugins.push(arc.clone()),
             PluginType::Viewer => self.viewer_plugins.push(arc.clone()),
+            PluginType::Overlay => {} // Overlay plugins are loaded separately
         }
     }
 
@@ -146,7 +161,22 @@ impl PluginManager {
 
     /// Number of loaded plugins
     pub fn plugin_count(&self) -> usize {
-        self.status_plugins.len() + self.viewer_plugins.len() + self.provider_plugins.len()
+        self.status_plugins.len() + self.viewer_plugins.len() + self.provider_plugins.len() + self.overlay_plugins.len()
+    }
+
+    /// List overlay plugins (name, description)
+    pub fn list_overlay_plugins(&self) -> Vec<(String, String)> {
+        self.overlay_plugins
+            .iter()
+            .map(|(info, _)| (info.name.clone(), info.description.clone()))
+            .collect()
+    }
+
+    /// Find an overlay plugin by name
+    pub fn find_overlay_by_name(&self, name: &str) -> Option<&(OverlayPluginInfo, PathBuf)> {
+        self.overlay_plugins
+            .iter()
+            .find(|(info, _)| info.name.eq_ignore_ascii_case(name))
     }
 
     /// List viewer plugins that can handle the given file
