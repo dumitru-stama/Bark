@@ -52,7 +52,16 @@ setup-cross:
 	@# System cross-compiler
 	@if command -v apt-get >/dev/null 2>&1; then \
 		echo "Detected Debian/Ubuntu — installing mingw-w64..."; \
-		sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64; \
+		sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64; \
+		posix_gcc="/usr/bin/x86_64-w64-mingw32-gcc-posix"; \
+		posix_gxx="/usr/bin/x86_64-w64-mingw32-g++-posix"; \
+		if [ -x "$$posix_gcc" ]; then \
+			echo "Setting POSIX threading model for mingw-w64 (required by Rust)..."; \
+			sudo update-alternatives --set x86_64-w64-mingw32-gcc "$$posix_gcc" 2>/dev/null || true; \
+		fi; \
+		if [ -x "$$posix_gxx" ]; then \
+			sudo update-alternatives --set x86_64-w64-mingw32-g++ "$$posix_gxx" 2>/dev/null || true; \
+		fi; \
 	elif command -v dnf >/dev/null 2>&1; then \
 		echo "Detected Fedora/RHEL — installing mingw64-gcc..."; \
 		sudo dnf install -y mingw64-gcc mingw64-gcc-c++; \
